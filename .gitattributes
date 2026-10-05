@@ -1,0 +1,10 @@
+# 补丁必须按 LF 应用：Windows 上 Git 默认 core.autocrlf=true，checkout 会把
+# .patch 改成 CRLF，于是补丁里的上下文行都带一个尾随 CR，和 LF 的 faiss 源码
+# 一行都对不上（现象是 "patch does not apply"，很容易误判成上游改了代码）。
+# 这里强制工作区用 LF；apply_patches.py 另外还会在应用前做一次 CRLF->LF 归一化。
+* text=auto eol=lf
+*.patch text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.py text eol=lf
+*.md text eol=lf

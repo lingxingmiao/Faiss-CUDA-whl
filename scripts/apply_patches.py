@@ -12,12 +12,32 @@ Handles three cases per patch:
 """
 import argparse
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 
 def run(cmd, cwd):
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+
+
+def lf_copy(patch, tmpdir):
+    """Return a path to the patch with LF endings.
+
+    Windows checkouts (git core.autocrlf=true, the Git-for-Windows default and
+    what the GitHub runner uses) rewrite these .patch files to CRLF.  The faiss
+    sources are LF, so every context line then carries a trailing CR and *no*
+    hunk matches -- which looks exactly like "upstream moved the code".
+    """
+    with open(patch, "rb") as f:
+        data = f.read()
+    if b"\r\n" not in data:
+        return patch, False
+    fixed = os.path.join(tmpdir, os.path.basename(patch))
+    with open(fixed, "wb") as f:
+        f.write(data.replace(b"\r\n", b"\n"))
+    return fixed, True
 
 
 def try_apply(patch, cwd):
@@ -56,15 +76,22 @@ def main():
         print("!! no patches found in %s" % args.patches)
         return 1
 
+    tmpdir = tempfile.mkdtemp(prefix="faiss-patches-")
     failed = []
-    for name in files:
-        path = os.path.abspath(os.path.join(args.patches, name))
-        status, err = try_apply(path, args.src)
-        print("%-52s %s" % (name, status.upper()))
-        if status == "failed":
-            failed.append((name, err))
-            for line in err.splitlines():
-                print("    %s" % line)
+    try:
+        for name in files:
+            path = os.path.abspath(os.path.join(args.patches, name))
+            path, normalized = lf_copy(path, tmpdir)
+            status, err = try_apply(path, args.src)
+            print("%-52s %s%s" % (name, status.upper(),
+                                  "  [patch was CRLF, applied as LF]"
+                                  if normalized else ""))
+            if status == "failed":
+                failed.append((name, err))
+                for line in err.splitlines():
+                    print("    %s" % line)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
     if failed:
         print("")
