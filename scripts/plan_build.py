@@ -97,7 +97,19 @@ def build_matrix(cuda_versions, python_versions, arch_mode):
         if major >= 13:
             log("!! skip CUDA %s: CUDA 13 dropped sm_60/sm_70 support" % cuda)
             continue
-        min_sm = 35 if major < 12 else 50
+        if major < 12:
+            # 两条都堵死:
+            #   * conda-forge 的拆分 CUDA 包(cuda-nvcc/cuda-cudart-dev/cuda-profiler-api/
+            #     libcublas-dev...)最早只有 12.0, 没有 11.8 可装
+            #   * 即便自己拖 NVIDIA 的 redist nvcc 11.8 来: 11.8 的 nvcc 不认 -std=c++20
+            #     (实测 "Value 'c++20' is not defined for option 'std'"), 而 faiss >= 1.12
+            #     的源码要求 C++20, 编不过
+            # 真要为 Kepler sm_35(GTX 780/Titan/K80) 出产物, 只能另起一条老 faiss(<=1.9, C++17)
+            # 的 legacy 线, 那是另一套 API/ABI, 不是这里的 wheel。
+            log("!! skip CUDA %s: 需要 C++20 的 faiss 与 nvcc 11.x 不兼容(且 conda-forge 无 11.x 组件)"
+                % cuda)
+            continue
+        min_sm = 50
         for idx, py in enumerate(python_versions):
             entries.append({
                 "cuda": short,

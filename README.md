@@ -96,9 +96,16 @@ repository_dispatch                                    多 CUDA × 多 PY   tag:
 > constraint 'l'`。封在 90 后 Blackwell 显卡（RTX 50 系 / B200）仍能用，靠的是 `90-virtual`
 > 的 PTX 由驱动 JIT；等 CCCL 修好把 `ARCH_MAX_SM` 改成 `0` 即可解封。
 >
-> **GTX 600 系（Kepler GK104 = sm_30）编不了**：`sm_30` 在 CUDA 11.0 就被移除，11.8 里最老
-> 只剩 `sm_35`（GK110：GTX 780/Ti、Titan、Tesla K80），12.x 里最老是 `sm_50`。这类卡只能用
-> CPU（TranslatorMinecraft 里会自动回退，不会崩）。
+> **GTX 600 系（Kepler GK104 = sm_30）编不了**：`sm_30` 在 CUDA 11.0 就被移除，任何现役
+> 工具链都出不了它的内核 → 这类卡用 CPU（TranslatorMinecraft 会自动回退，不会崩）。
+>
+> **CUDA 11.8（能编 sm_35：GTX 780/Ti、Titan、Tesla K80）目前也做不了**，两条都堵死：
+> ① conda-forge 的拆分 CUDA 包（`cuda-nvcc`/`cuda-cudart-dev`/`cuda-profiler-api`/
+> `libcublas-dev`…）最早只有 12.0，没有 11.8 可装；② 即便自己去拖 NVIDIA 的 redist nvcc 11.8，
+> 它不认 `-std=c++20`（实测 `nvcc fatal : Value 'c++20' is not defined for option 'std'`），
+> 而 faiss ≥ 1.12 的源码要 C++20。真要为 Kepler 出产物，只能另起一条 **老 faiss（≤1.9，C++17）
+> + CUDA 11.8 + 老 Python** 的 legacy 线 —— 那是另一套 API/ABI，不能和这里的 wheel 混用。
+> `plan_build.py` 现在遇到 CUDA < 12 会直接跳过并打印这条理由。
 
 工具链来源（保证可复现，不依赖第三方 action 的版本表）：
 
