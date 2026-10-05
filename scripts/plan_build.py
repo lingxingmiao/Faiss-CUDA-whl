@@ -122,7 +122,7 @@ def main():
     ap.add_argument("--cuda", default=os.environ.get("IN_CUDA") or DEFAULT_CUDA)
     ap.add_argument("--python", default=os.environ.get("IN_PYTHON") or DEFAULT_PYTHON)
     ap.add_argument("--arch-mode", default=os.environ.get("IN_ARCH_MODE") or "major",
-                    choices=["major", "min60", "all"])
+                    help="major / min60 / all / explicit list like 60,70")
     ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     args = ap.parse_args()
 

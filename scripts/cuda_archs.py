@@ -17,6 +17,9 @@ Modes
           sm_72/sm_75 -- full coverage with the fewest kernels (fast build).
   min60 : every arch >= sm_60 that the toolkit reports (slow, huge DLL).
   all   : everything nvcc knows, including ancient archs.
+  <list>: an explicit list, e.g. "60,70" or "70;80" (validated against the
+          toolkit). One arch = one nvcc codegen pass, so this is the lever for
+          build time: every job compiles the whole of faiss once per arch.
 
 Output: e.g. 60-real;70-real;80-real;90-real;100-real;120-real;121-virtual
 (`-virtual` on the newest one adds PTX so future GPUs can JIT.)
@@ -63,12 +66,29 @@ def numeric(arch):
     return int(re.match(r"(\d+)", arch).group(1))
 
 
+def explicit_list(mode, available):
+    """'60,70' / '70;80' -> ['60', '70'] validated against the toolkit."""
+    wanted = [a.strip() for a in re.split(r"[,;]", mode) if a.strip()]
+    kept = []
+    for w in wanted:
+        hit = [a for a in available if a == w
+               or a.startswith(re.match(r"(\d+)", w).group(1))]
+        if not hit:
+            raise RuntimeError("arch sm_%s is not supported by this toolkit "
+                               "(available: %s)" % (w, ",".join(available)))
+        keep = min(hit, key=lambda a: (numeric(a) != numeric(w), numeric(a)))
+        if keep not in kept:
+            kept.append(keep)
+    return kept
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--nvcc", default=None)
     ap.add_argument("--min-sm", type=int, default=60,
                     help="drop archs older than this (default 60 = P100)")
-    ap.add_argument("--mode", default="major", choices=["major", "min60", "all"])
+    ap.add_argument("--mode", default="major",
+                    help="major / min60 / all / explicit list like 60,70")
     ap.add_argument("--require", default="60,70",
                     help="comma separated archs that MUST be present")
     args = ap.parse_args()
@@ -78,12 +98,16 @@ def main():
     print("nvcc      : %s" % nvcc, file=sys.stderr)
     print("all archs : %s" % ",".join(archs), file=sys.stderr)
 
-    min_sm = 0 if args.mode == "all" else args.min_sm
-    kept = [a for a in archs if numeric(a) >= min_sm]
+    mode = args.mode.strip().lower()
+    if mode in ("major", "min60", "all"):
+        min_sm = 0 if mode == "all" else args.min_sm
+        kept = [a for a in archs if numeric(a) >= min_sm]
+    else:
+        kept = explicit_list(mode, archs)
     if not kept:
-        raise RuntimeError("no arch >= sm_%d in %s" % (min_sm, archs))
+        raise RuntimeError("no arch >= sm_%d in %s" % (args.min_sm, archs))
 
-    if args.mode == "major":
+    if mode == "major":
         # keep the lowest minor of each major version; SASS is minor-forward
         # compatible inside a major, so one cubin per major is enough.
         by_major = {}
@@ -92,6 +116,8 @@ def main():
             if major not in by_major or numeric(a) < numeric(by_major[major]):
                 by_major[major] = a
         kept = [by_major[k] for k in sorted(by_major)]
+    elif mode not in ("min60", "all"):
+        kept = sorted(kept, key=numeric)
 
     required = [r.strip() for r in args.require.split(",") if r.strip()]
     missing = [r for r in required
