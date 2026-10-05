@@ -151,16 +151,13 @@ jobs:
           }
           if (-not $mm) { throw "micromamba executable not found" }
           Write-Host "micromamba: $mm"
-          # micromamba 2.x 默认就不再捕获子进程输出，并删掉了 --no-capture-output 开关；
-          # （若仍传该开关，它会被当成要执行的命令 -> cmd 报 "'--no-capture-output' is not
-          # recognized"。）1.x 则相反：不加开关会把输出吞掉。所以这里探测一次，
-          # 把最终参数写进 $GITHUB_ENV 供后续步骤使用。
-          $mmRunArgs = "run -n build"
-          if ((& $mm run --help 2>&1 | Out-String) -match "no-capture-output") {
-            $mmRunArgs = "run --no-capture-output -n build"
-            Write-Host "micromamba run: legacy --no-capture-output"
-          }
-          "MM_RUN_ARGS=$mmRunArgs" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          # 只用 micromamba 解析一次环境路径; 后面的构建步骤不走 `micromamba run`:
+          #   * micromamba 2.x 的 run 参数与 1.x 不兼容(--no-capture-output)
+          #   * Windows 上它会先跑 cmd 激活脚本, 回显会混进子进程 stdout
+          #   * 最关键: 它会把 conda 环境自带的 MSVC(14.29) 环境变量盖到 INCLUDE/LIB 上, 与 runner
+          #     的 14.44 host 编译器不一致, nvcc 于是自己跑去调 vcvars64.bat 并失败
+          #     ("nvcc fatal : Could not set up the environment for Microsoft Visual Studio")
+          # 改成"往 PATH 前面塞 conda 环境目录", 与本地已验证的 _faissbuild\configure.bat 一致。
           $pyOut = & $mm run -n build python -c "import sys;print(sys.prefix)"
           # 同上: 激活脚本的 SET 回显会混进 stdout, 只认"最后一行且确实是存在的目录"
           $prefix = (($pyOut | Where-Object { $_ -and (Test-Path "$_".Trim() -PathType Container) }) |
@@ -202,14 +199,19 @@ jobs:
           "cuobjdump=$cuobj"  | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           "blaslib=$blas"     | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           "mm=$mm"     | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-          & $mm run -n build nvcc --version | Select-String "release"
+          # 后续步骤用这两行"激活"环境(顺序照抄 conda 的 PATH 前缀, 不跑 activation 脚本)
+          $envPath = "$prefix;$prefix\Library\bin;$prefix\Scripts;$prefix\Library\bin\Lib"
+          "CONDA_ENV_PATH=$envPath" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "CONDA_PREFIX=$prefix"    | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          Write-Host "env path  : $envPath"
+          & $nvcc --version | Select-String "release"
 
       - name: 安装 python 构建依赖
         shell: pwsh
         run: |
-          $ra = $env:MM_RUN_ARGS.Split(' ')
-          & "${{ steps.env.outputs.mm }}" @ra python -m pip install --upgrade pip setuptools wheel
-          & "${{ steps.env.outputs.mm }}" @ra python -m pip install packaging delvewheel
+          $env:PATH = "$env:CONDA_ENV_PATH;$env:PATH"
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install packaging delvewheel
 
       - name: 固定 git 行尾（避免 autocrlf 改写补丁内容）
         shell: pwsh
@@ -220,23 +222,22 @@ jobs:
       - name: 拉取 faiss ${{ needs.plan.outputs.version }} 并打补丁
         shell: pwsh
         run: |
-          $ra = $env:MM_RUN_ARGS.Split(' ')
+          $env:PATH = "$env:CONDA_ENV_PATH;$env:PATH"
           git clone --depth 1 --branch "${{ needs.plan.outputs.version }}" `
             https://github.com/${{ env.UPSTREAM_REPO }}.git src
           git -C src log --oneline -1
-          & "${{ steps.env.outputs.mm }}" @ra python scripts/apply_patches.py `
+          python scripts/apply_patches.py `
             --src src --patches .github/patches --strict ${{ inputs.strict_patches || 'false' }}
 
       - name: 计算 CUDA 架构列表
         id: archs
         shell: pwsh
         run: |
-          $ra = $env:MM_RUN_ARGS.Split(' ')
-          # 走文件而不是 stdout: micromamba 在 Windows 上先执行 cmd 激活脚本, 那些 SET 回显
-          # 会混进子进程 stdout（曾把 -DCMAKE_CUDA_ARCHITECTURES 塞成一堆 cmd 提示符）。
+          $env:PATH = "$env:CONDA_ENV_PATH;$env:PATH"
+          # 架构串走文件而不是 stdout: 万一有别的输出混进 stdout, 也不会把 CMake 参数写坏
           $out = Join-Path $env:RUNNER_TEMP "cuda-archs.txt"
           Remove-Item -Force $out -ErrorAction SilentlyContinue
-          & "${{ steps.env.outputs.mm }}" @ra python scripts/cuda_archs.py `
+          python scripts/cuda_archs.py `
             --mode ${{ matrix.arch_mode }} --nvcc "${{ steps.env.outputs.nvcc }}" `
             --require 60,70 --out "$out"
           if ($LASTEXITCODE -ne 0) { throw "cuda_archs.py failed" }
@@ -251,7 +252,7 @@ jobs:
       - name: CMake 配置
         shell: pwsh
         run: |
-          $ra = $env:MM_RUN_ARGS.Split(' ')
+          $env:PATH = "$env:CONDA_ENV_PATH;$env:PATH"
           $env:CUDACXX = "${{ steps.env.outputs.nvcc }}"
           $env:CUDAToolkit_ROOT = "${{ steps.env.outputs.prefix }}\Library"
           $env:CUDA_PATH = "${{ steps.env.outputs.prefix }}\Library"
@@ -259,8 +260,10 @@ jobs:
           # 只写 cl.exe 时 CMake 会自己挑到 14.29(v142)。nvcc 遇到不支持的 host 编译器不会报错,
           # 而是打印 "The -std=c++20 flag is not supported with the configured host compiler. Flag
           # will be ignored." 然后退回 C++14 —— 于是 faiss 头文件里的 C++17/20 特性全线编译失败。
-          $cl = (Get-Command cl.exe -ErrorAction SilentlyContinue).Source
-          if (-not $cl) { throw "cl.exe not found (msvc-dev-cmd 没有生效?)" }
+          # 从 msvc-dev-cmd 设好的工具集根目录取 cl.exe, 不靠 PATH 猜(conda 环境里可能还有别的)
+          $cl = if ($env:VCToolsInstallDir) { Join-Path $env:VCToolsInstallDir "bin\HostX64\x64\cl.exe" }
+                else { (Get-Command cl.exe -ErrorAction SilentlyContinue).Source }
+          if (-not $cl -or -not (Test-Path $cl)) { throw "cl.exe not found (msvc-dev-cmd 没有生效?)" }
           Write-Host "cl.exe: $cl  (VCToolsVersion=$env:VCToolsVersion)"
           # 提前验证 nvcc 真的接受 -std=c++20, 别等 20 分钟后才炸
           $probe = Join-Path $env:RUNNER_TEMP "nvccprobe"
@@ -273,7 +276,7 @@ jobs:
             throw "nvcc 不接受 -std=c++20 (host: $cl); faiss 1.15 需要 C++20"
           }
           # 不要写 -DCMAKE_CUDA_STANDARD: CUDA 标准跟着 faiss 的 CMAKE_CXX_STANDARD 走(1.15 起是 20)
-          & "${{ steps.env.outputs.mm }}" @ra cmake -S src -B build -G Ninja `
+          cmake -S src -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_COMPILER="$cl" -DCMAKE_CXX_COMPILER="$cl" `
             -DCMAKE_CUDA_COMPILER="${{ steps.env.outputs.nvcc }}" `
@@ -292,16 +295,16 @@ jobs:
       - name: 编译 libfaiss（含 CUDA 内核）与 python 绑定
         shell: pwsh
         run: |
-          $ra = $env:MM_RUN_ARGS.Split(' ')
-          & "${{ steps.env.outputs.mm }}" @ra cmake --build build `
+          $env:PATH = "$env:CONDA_ENV_PATH;$env:PATH"
+          cmake --build build `
             --target faiss faiss_c swigfaiss --parallel $env:NUMBER_OF_PROCESSORS
 
       - name: 校验 faiss.dll 架构
         shell: pwsh
         run: |
-          $ra = $env:MM_RUN_ARGS.Split(' ')
+          $env:PATH = "$env:CONDA_ENV_PATH;$env:PATH"
           # min-archs=2：目标是 sm_60/sm_70 必须存在；显式只构建 60,70 时也就只有 2 个
-          & "${{ steps.env.outputs.mm }}" @ra python scripts/verify_artifact.py `
+          python scripts/verify_artifact.py `
             --dll build/faiss/faiss.dll --cuobjdump "${{ steps.env.outputs.cuobjdump }}" `
             --require 60,70 --min-archs 2
 
@@ -311,7 +314,7 @@ jobs:
           FAISS_VER: ${{ needs.plan.outputs.version }}
           CUDA_TAG: ${{ matrix.cuda_tag }}
         run: |
-          $ra = $env:MM_RUN_ARGS.Split(' ')
+          $env:PATH = "$env:CONDA_ENV_PATH;$env:PATH"
           $ver = $env:FAISS_VER.TrimStart('v')
           $pyTag = "cp" + ("${{ matrix.python }}" -replace '\.', '')
           cd build/faiss/python
@@ -325,24 +328,24 @@ jobs:
             -replace 'version="[^"]*"', "version=`"$ver+$($env:CUDA_TAG)`"" |
             Set-Content -Encoding utf8 setup.py
           Select-String -Path setup.py -Pattern 'name=|version=' | Select-Object -First 2
-          & "${{ steps.env.outputs.mm }}" @ra python setup.py bdist_wheel
+          python setup.py bdist_wheel
           # setup.py 里没有 ext_modules，wheel 会把包当成纯 Python（py3-none-any）。
           # 里面装的是 ABI 相关的 _swigfaiss.pyd，必须按解释器/平台重新打标签。
           $raw = (Get-ChildItem dist/*.whl | Select-Object -First 1).FullName
-          & "${{ steps.env.outputs.mm }}" @ra python -m wheel tags `
+          python -m wheel tags `
             --python-tag $pyTag --abi-tag $pyTag --platform-tag win_amd64 --remove $raw
           Get-ChildItem dist
 
       - name: 精简 wheel（CUDA 运行时由系统 / nvidia-*-cu12 提供）
         shell: pwsh
         run: |
-          $ra = $env:MM_RUN_ARGS.Split(' ')
+          $env:PATH = "$env:CONDA_ENV_PATH;$env:PATH"
           $raw = (Get-ChildItem build/faiss/python/dist/*.whl | Select-Object -First 1).FullName
           # --add-path / --exclude 都是分号分隔的单个参数（重复传只有最后一个生效）
           $search = "build/faiss;${{ steps.env.outputs.bin }}"
           $exclude = "cublas64_*;cublasLt64_*;cudart64_*;curand64_*;nvrtc64_*;nvJitLink*;" +
                      "nppi*;npp*;cufft64_*;cusparse64_*;cusolver64_*"
-          & "${{ steps.env.outputs.mm }}" @ra python -m delvewheel repair $raw `
+          python -m delvewheel repair $raw `
             --add-path "$search" --exclude "$exclude" `
             -w wheelhouse-light
           Get-ChildItem wheelhouse-light
@@ -353,7 +356,7 @@ jobs:
         env:
           CUDA_TAG: ${{ matrix.cuda_tag }}
         run: |
-          $ra = $env:MM_RUN_ARGS.Split(' ')
+          $env:PATH = "$env:CONDA_ENV_PATH;$env:PATH"
           $pyTag = "cp" + ("${{ matrix.python }}" -replace '\.', '')
           # 独立发行版名（版本后缀 +.full），否则与精简 wheel 同名互相覆盖
           Copy-Item -Recurse -Force build/faiss/python build/faiss/python_full
@@ -362,13 +365,13 @@ jobs:
             -replace '\+cu\d+', "+$($env:CUDA_TAG).full" `
             | Set-Content -Encoding utf8 build/faiss/python_full/setup.py
           Push-Location build/faiss/python_full
-          & "${{ steps.env.outputs.mm }}" @ra python setup.py bdist_wheel
+          python setup.py bdist_wheel
           Pop-Location
           $raw = (Get-ChildItem build/faiss/python_full/dist/*.whl | Select-Object -First 1).FullName
-          & "${{ steps.env.outputs.mm }}" @ra python -m wheel tags `
+          python -m wheel tags `
             --python-tag $pyTag --abi-tag $pyTag --platform-tag win_amd64 --remove $raw
           $search = "build/faiss;${{ steps.env.outputs.bin }};${{ steps.env.outputs.cuda_bin }}"
-          & "${{ steps.env.outputs.mm }}" @ra python -m delvewheel repair $raw `
+          python -m delvewheel repair $raw `
             --add-path "$search" `
             -w wheelhouse-full
           Get-ChildItem wheelhouse-full
