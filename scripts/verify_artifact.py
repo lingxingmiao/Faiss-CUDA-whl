@@ -91,7 +91,10 @@ def check_wheel(args):
         names = z.namelist()
     pyd = [n for n in names if re.match(r"faiss/_swigfaiss.*\.pyd$", n)]
     marker = [n for n in names if n.endswith("faiss/_gpu_build.py")]
-    libs = sorted({n.split("/")[1] for n in names if n.startswith("faiss.libs/")})
+    # delvewheel 把 vendored DLL 放进 <发行版名>.libs/（这里是 faiss_gpu_cu129.libs），
+    # 不叫固定名字 faiss.libs；按 ".libs/" 后缀识别，否则这个检查等于没看
+    libs = sorted({n.split("/", 1)[1] for n in names
+                   if ".libs/" in n and n.split("/", 1)[1]})
     log("pyd      : %s" % (pyd or "MISSING"))
     log("marker   : %s" % (marker or "MISSING"))
     log("bundled  : %s" % (", ".join(libs) if libs else "(none)"))
