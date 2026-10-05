@@ -137,21 +137,55 @@ jobs:
               - conda-forge
             channel_priority: strict
 
+      # micromamba 的 action 只在 bash 里做激活，pwsh 步骤里 `micromamba` 不在 PATH；
+      # 这里把真实可执行文件包一层放进 PATH，后续步骤照旧写 `micromamba run ...` 即可。
+      - name: 注册 micromamba 到 PATH
+        shell: pwsh
+        run: |
+          $mm = $env:MAMBA_EXE
+          if (-not $mm) { $mm = (Get-Command micromamba -ErrorAction SilentlyContinue).Source }
+          if (-not $mm) { throw "micromamba executable not found" }
+          $dir = Join-Path $env:RUNNER_TEMP "mambabin"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Set-Content -Path (Join-Path $dir "micromamba.cmd") `
+            -Value "@echo off`r`n`"$mm`" %*" -Encoding ascii
+          $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          Write-Host "micromamba -> $mm"
+
       - name: 解析环境路径
         id: env
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $prefix = (micromamba run -n build python -c "import sys;print(sys.prefix)").Trim()
-          $bin  = Join-Path $prefix "Library\bin"
-          $lib  = Join-Path $prefix "Library\lib"
-          $nvcc = Join-Path $bin "nvcc.exe"
-          $cuobj= Join-Path $bin "cuobjdump.exe"
-          $blas = Join-Path $lib "openblas.lib"
-          foreach ($p in @($prefix, $bin, $lib, $nvcc, $cuobj, $blas)) {
-            if (-not (Test-Path $p)) { throw "missing: $p" }
+          Write-Host "prefix: $prefix"
+          function Find-1($name) {
+            (Get-ChildItem -Recurse -Filter $name -Path $prefix -ErrorAction SilentlyContinue |
+              Select-Object -First 1).FullName
           }
+          $nvcc    = Find-1 "nvcc.exe"
+          $cuobj   = Find-1 "cuobjdump.exe"
+          $blas    = Find-1 "openblas.lib"
+          $blasDll = Find-1 "openblas.dll"
+          $cudart  = Find-1 "cudart64_12.dll"
+          Write-Host "nvcc     : $nvcc"
+          Write-Host "cuobjdump: $cuobj"
+          Write-Host "openblas : $blas / $blasDll"
+          Write-Host "cudart   : $cudart"
+          $missing = @()
+          foreach ($p in @($nvcc, $cuobj, $blas, $blasDll)) { if (-not $p) { $missing += 1 } }
+          if ($missing.Count -gt 0) {
+            Get-ChildItem (Join-Path $prefix "Library") -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host "Library/: $($_.Name)" }
+            Get-ChildItem (Join-Path $prefix "Library\bin") -ErrorAction SilentlyContinue |
+              Select-Object -First 50 | ForEach-Object { Write-Host "bin/: $($_.Name)" }
+            throw "essential build files not found under $prefix"
+          }
+          $bin = Split-Path $blasDll
+          $cudaBin = if ($cudart) { Split-Path $cudart } else { $bin }
           "prefix=$prefix"    | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           "bin=$bin"          | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          "cuda_bin=$cudaBin" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           "nvcc=$nvcc"        | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           "cuobjdump=$cuobj"  | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           "blaslib=$blas"     | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
@@ -269,7 +303,9 @@ jobs:
           Pop-Location
           $raw = (Get-ChildItem build/faiss/python_full/dist/*.whl | Select-Object -First 1).FullName
           micromamba run --no-capture-output -n build python -m delvewheel repair $raw `
-            --add-path "${{ steps.env.outputs.bin }}" -w wheelhouse-full
+            --add-path "${{ steps.env.outputs.bin }}" `
+            --add-path "${{ steps.env.outputs.cuda_bin }}" `
+            -w wheelhouse-full
           Get-ChildItem wheelhouse-full
 
       - name: 组装产物（wheel + conda 落地 dll zip + 构建信息）
@@ -329,7 +365,7 @@ jobs:
       - name: 冒烟测试（精简 wheel + 系统 CUDA 运行时）
         shell: pwsh
         env:
-          CUDA_BIN: ${{ steps.env.outputs.bin }}
+          CUDA_BIN: ${{ steps.env.outputs.cuda_bin }}
         run: |
           $whl = (Get-ChildItem wheelhouse-light/*.whl | Select-Object -First 1).FullName
           python -m pip install --force-reinstall --no-deps $whl
@@ -352,7 +388,7 @@ jobs:
         if: ${{ inputs.bundle_cuda }}
         shell: pwsh
         env:
-          CUDA_BIN: ${{ steps.env.outputs.bin }}
+          CUDA_BIN: ${{ steps.env.outputs.cuda_bin }}
         run: |
           $env:PATH = ($env:PATH -split ';' |
             Where-Object { $_ -and ($_ -notlike "$env:CUDA_BIN*") -and ($_ -notlike "*nvidia*") }) -join ';'
