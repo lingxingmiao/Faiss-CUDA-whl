@@ -255,14 +255,29 @@ jobs:
           $env:CUDACXX = "${{ steps.env.outputs.nvcc }}"
           $env:CUDAToolkit_ROOT = "${{ steps.env.outputs.prefix }}\Library"
           $env:CUDA_PATH = "${{ steps.env.outputs.prefix }}\Library"
-          # 不要写 -DCMAKE_CUDA_STANDARD: CMake 会把 faiss 的 CMAKE_CXX_STANDARD(1.15 起是 20) 传给
-          # nvcc; 钉成 17 会让 faiss/impl/approx_topk/*.h 里的 C++20 模板 lambda 编译失败
-          # ("explicit lambda template parameters are a C++20 feature")。
+          # 必须把 cl.exe 的完整路径交给 CMake: runner 上同时装了 VS2022 与 VS2019 的 v142 工具集,
+          # 只写 cl.exe 时 CMake 会自己挑到 14.29(v142)。nvcc 遇到不支持的 host 编译器不会报错,
+          # 而是打印 "The -std=c++20 flag is not supported with the configured host compiler. Flag
+          # will be ignored." 然后退回 C++14 —— 于是 faiss 头文件里的 C++17/20 特性全线编译失败。
+          $cl = (Get-Command cl.exe -ErrorAction SilentlyContinue).Source
+          if (-not $cl) { throw "cl.exe not found (msvc-dev-cmd 没有生效?)" }
+          Write-Host "cl.exe: $cl  (VCToolsVersion=$env:VCToolsVersion)"
+          # 提前验证 nvcc 真的接受 -std=c++20, 别等 20 分钟后才炸
+          $probe = Join-Path $env:RUNNER_TEMP "nvccprobe"
+          New-Item -ItemType Directory -Force -Path $probe | Out-Null
+          Set-Content -Path "$probe\probe.cu" -Encoding ascii -Value "template <int N> struct S { static constexpr int v = N; }; __global__ void k(int* o) { *o = S<1>::v; }"
+          $probeOut = & "${{ steps.env.outputs.nvcc }}" -std=c++20 -ccbin "$cl" -allow-unsupported-compiler -c "$probe\probe.cu" -o "$probe\probe.obj" 2>&1
+          $probeCode = $LASTEXITCODE
+          $probeOut | Write-Host
+          if ($probeCode -ne 0 -or (($probeOut -join "`n") -match "is not supported with the configured host compiler")) {
+            throw "nvcc 不接受 -std=c++20 (host: $cl); faiss 1.15 需要 C++20"
+          }
+          # 不要写 -DCMAKE_CUDA_STANDARD: CUDA 标准跟着 faiss 的 CMAKE_CXX_STANDARD 走(1.15 起是 20)
           & "${{ steps.env.outputs.mm }}" @ra cmake -S src -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_C_COMPILER=cl.exe -DCMAKE_CXX_COMPILER=cl.exe `
+            -DCMAKE_C_COMPILER="$cl" -DCMAKE_CXX_COMPILER="$cl" `
             -DCMAKE_CUDA_COMPILER="${{ steps.env.outputs.nvcc }}" `
-            -DCMAKE_CUDA_HOST_COMPILER=cl.exe `
+            -DCMAKE_CUDA_HOST_COMPILER="$cl" `
             -DCMAKE_CUDA_ARCHITECTURES="${{ steps.archs.outputs.archs }}" `
             -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler" `
             -DCUDAToolkit_ROOT="$env:CUDAToolkit_ROOT" `
