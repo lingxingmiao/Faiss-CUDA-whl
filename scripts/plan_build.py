@@ -74,7 +74,7 @@ def cuda_tag(version):
     return "cu%s%s" % (parts[0], parts[1])
 
 
-def build_matrix(cuda_versions, python_versions, arch_mode):
+def build_matrix(cuda_versions, python_versions, arch_mode, allow_legacy=False):
     """cuda_versions entries may be '12.9' or '12.9.0'; only major.minor matters
     because the toolkit comes from conda-forge as `cuda-version=<major.minor>`.
 
