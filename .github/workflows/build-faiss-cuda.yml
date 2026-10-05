@@ -255,13 +255,15 @@ jobs:
           $env:CUDACXX = "${{ steps.env.outputs.nvcc }}"
           $env:CUDAToolkit_ROOT = "${{ steps.env.outputs.prefix }}\Library"
           $env:CUDA_PATH = "${{ steps.env.outputs.prefix }}\Library"
+          # 不要写 -DCMAKE_CUDA_STANDARD: CMake 会把 faiss 的 CMAKE_CXX_STANDARD(1.15 起是 20) 传给
+          # nvcc; 钉成 17 会让 faiss/impl/approx_topk/*.h 里的 C++20 模板 lambda 编译失败
+          # ("explicit lambda template parameters are a C++20 feature")。
           & "${{ steps.env.outputs.mm }}" @ra cmake -S src -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_COMPILER=cl.exe -DCMAKE_CXX_COMPILER=cl.exe `
             -DCMAKE_CUDA_COMPILER="${{ steps.env.outputs.nvcc }}" `
             -DCMAKE_CUDA_HOST_COMPILER=cl.exe `
             -DCMAKE_CUDA_ARCHITECTURES="${{ steps.archs.outputs.archs }}" `
-            -DCMAKE_CUDA_STANDARD=17 `
             -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler" `
             -DCUDAToolkit_ROOT="$env:CUDAToolkit_ROOT" `
             -DPython_EXECUTABLE="${{ steps.env.outputs.prefix }}\python.exe" `
