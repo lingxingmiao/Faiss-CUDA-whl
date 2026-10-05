@@ -104,12 +104,16 @@ MSVC 不固定工具集、也不用在脚本里登记版本表：一律用 Runne
 > ① conda-forge 的拆分 CUDA 包（`cuda-nvcc`/`cuda-cudart-dev`/`cuda-profiler-api`/
 > `libcublas-dev`…）最早只有 12.0，11.8 的组件得从 NVIDIA 的 redist 归档取；
 > ② nvcc 11.8 不认 `-std=c++20`（实测 `nvcc fatal : Value 'c++20' is not defined for option 'std'`），
-> 而 **faiss ≥ 1.14.3 声明 C++20**（1.13.2 / 1.14.0 还是 C++17）——所以这条线最高只能配
-> **faiss 1.14.3**，并把 CUDA 侧压到 C++17（`-DCMAKE_CUDA_STANDARD=17`，本地已确认 1.14.3 的 CUDA
-> 代码能在 C++17 下编译，四个补丁对 1.14.x 也全部适用）；
-> ③ 还必须配 **MSVC 14.29(v142)**：更新的 STL 会直接 `static assertion failed: STL1002:
-> Unexpected compiler version, expected CUDA 12.4 or newer` 把 nvcc 11.8 挡在门外。
-> `plan_build.py` 现在遇到 CUDA < 12 默认跳过并打印这条理由（`allow_legacy_cuda` 开关落地后才放行）。
+> 而 faiss 从 **1.14.3 起 CUDA 侧就要 C++20**：`faiss/impl/approx_topk/approx_topk.h:270` 和
+> `faiss/impl/Panorama.h:361` 用了模板 lambda，nvcc 11.8 会直接报 `expected a "{" introducing a
+> lambda body`（`CMAKE_CXX_STANDARD` 只是声明，关键是被 `.cu` 传递包含）。所以这条线**最高只能配
+> faiss 1.14.0**（`CMAKE_CXX_STANDARD 17`）：实测它的 `GpuIndexBinaryFlat.cu` / `Distance.cu` /
+> `IVFPQ.cu` 在 nvcc 11.8 + `-std=c++17` 下全部编过，1.13.2 同样可以。
+> 另有一条本机踩到的坑：MSVC 14.44 的 STL 会用 `static assertion failed: STL1002: Unexpected
+> compiler version, expected CUDA 12.4 or newer` 挡掉 nvcc 11.8，加
+> `-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH` 可绕过（或改用 MSVC 14.29）。
+> 这条线**不参与上面的自动矩阵**，是手动一次性构建后上传 Release。
+> `plan_build.py` 遇到 CUDA < 12 默认跳过并打印理由（自动矩阵不做这条线）。
 
 工具链来源（保证可复现，不依赖第三方 action 的版本表）：
 
