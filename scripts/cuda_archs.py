@@ -91,6 +91,9 @@ def main():
                     help="major / min60 / all / explicit list like 60,70")
     ap.add_argument("--require", default="60,70",
                     help="comma separated archs that MUST be present")
+    ap.add_argument("--out", default=None,
+                    help="write the cmake arch list to this file as well")
+
     args = ap.parse_args()
 
     nvcc = find_nvcc(args.nvcc)
@@ -132,6 +135,11 @@ def main():
     parts.append("%s-virtual" % newest)  # PTX for forward compatibility
     cmake_list = ";".join(parts)
     print("cmake      : %s" % cmake_list, file=sys.stderr)
+    if args.out:
+        # 单独写文件: micromamba 在 Windows 上会先跑一遍 cmd 激活脚本, 它的 SET 回显会混进
+        # stdout, 调用方解析 stdout 时容易把激活噪音当成结果。
+        with open(args.out, "w", encoding="utf-8", newline="\n") as f:
+            f.write(cmake_list + "\n")
     print(cmake_list)
     return 0
 

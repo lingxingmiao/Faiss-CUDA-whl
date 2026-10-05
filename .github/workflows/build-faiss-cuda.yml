@@ -162,7 +162,9 @@ jobs:
           }
           "MM_RUN_ARGS=$mmRunArgs" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           $pyOut = & $mm run -n build python -c "import sys;print(sys.prefix)"
-          $prefix = (($pyOut | Where-Object { $_ }) | Select-Object -Last 1)
+          # 同上: 激活脚本的 SET 回显会混进 stdout, 只认"最后一行且确实是存在的目录"
+          $prefix = (($pyOut | Where-Object { $_ -and (Test-Path "$_".Trim() -PathType Container) }) |
+            Select-Object -Last 1)
           if ($prefix) { $prefix = "$prefix".Trim() }
           if (-not $prefix) {
             Write-Host "micromamba output: $($pyOut -join ' | ')"
@@ -230,9 +232,19 @@ jobs:
         shell: pwsh
         run: |
           $ra = $env:MM_RUN_ARGS.Split(' ')
-          $archs = & "${{ steps.env.outputs.mm }}" @ra python scripts/cuda_archs.py `
-            --mode ${{ matrix.arch_mode }} --nvcc "${{ steps.env.outputs.nvcc }}" --require 60,70
+          # 走文件而不是 stdout: micromamba 在 Windows 上先执行 cmd 激活脚本, 那些 SET 回显
+          # 会混进子进程 stdout（曾把 -DCMAKE_CUDA_ARCHITECTURES 塞成一堆 cmd 提示符）。
+          $out = Join-Path $env:RUNNER_TEMP "cuda-archs.txt"
+          Remove-Item -Force $out -ErrorAction SilentlyContinue
+          & "${{ steps.env.outputs.mm }}" @ra python scripts/cuda_archs.py `
+            --mode ${{ matrix.arch_mode }} --nvcc "${{ steps.env.outputs.nvcc }}" `
+            --require 60,70 --out "$out"
           if ($LASTEXITCODE -ne 0) { throw "cuda_archs.py failed" }
+          if (-not (Test-Path $out)) { throw "cuda_archs.py wrote no arch list" }
+          $archs = (Get-Content -Raw $out).Trim()
+          if ($archs -notmatch '^\d+-(real|virtual)(;\d+-(real|virtual))*$') {
+            throw "unexpected arch list: '$archs'"
+          }
           "archs=$archs" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           Write-Host "CUDA archs: $archs"
 
