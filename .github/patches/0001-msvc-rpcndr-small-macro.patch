@@ -1,0 +1,45 @@
+--- a/faiss/gpu/utils/MergeNetworkWarp.cuh
++++ b/faiss/gpu/utils/MergeNetworkWarp.cuh
+@@ -105,18 +105,19 @@
+         V otherV = shfl_xor(v, 2 * L - 1);
+ 
+         // Whether we are the lesser thread in the exchange
+-        bool small = !(laneId & L);
++        // NOTE: named isSmall because rpcndr.h (Windows SDK) does #define small char
++        bool isSmall = !(laneId & L);
+ 
+         if (Dir) {
+             // See the comment above how performing both of these
+             // comparisons in the warp seems to win out over the
+             // alternatives in practice
+-            bool s = small ? Comp::gt(k, otherK) : Comp::lt(k, otherK);
++            bool s = isSmall ? Comp::gt(k, otherK) : Comp::lt(k, otherK);
+             assign(s, k, otherK);
+             assign(s, v, otherV);
+ 
+         } else {
+-            bool s = small ? Comp::lt(k, otherK) : Comp::gt(k, otherK);
++            bool s = isSmall ? Comp::lt(k, otherK) : Comp::gt(k, otherK);
+             assign(s, k, otherK);
+             assign(s, v, otherV);
+         }
+@@ -128,15 +129,16 @@
+         V otherV = shfl_xor(v, stride);
+ 
+         // Whether we are the lesser thread in the exchange
+-        bool small = !(laneId & stride);
++        // NOTE: named isSmall because rpcndr.h (Windows SDK) does #define small char
++        bool isSmall = !(laneId & stride);
+ 
+         if (Dir) {
+-            bool s = small ? Comp::gt(k, otherK) : Comp::lt(k, otherK);
++            bool s = isSmall ? Comp::gt(k, otherK) : Comp::lt(k, otherK);
+             assign(s, k, otherK);
+             assign(s, v, otherV);
+ 
+         } else {
+-            bool s = small ? Comp::lt(k, otherK) : Comp::gt(k, otherK);
++            bool s = isSmall ? Comp::lt(k, otherK) : Comp::gt(k, otherK);
+             assign(s, k, otherK);
+             assign(s, v, otherV);
+         }

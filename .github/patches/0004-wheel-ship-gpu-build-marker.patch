@@ -1,0 +1,16 @@
+--- a/faiss/python/setup.py
++++ b/faiss/python/setup.py
+@@ -26,6 +26,13 @@
+     shutil.copyfile("__init__.pyi", "faiss/__init__.pyi")
+ if os.path.exists("py.typed"):
+     shutil.copyfile("py.typed", "faiss/py.typed")
++
++# GPU build marker written by CMake when FAISS_ENABLE_GPU=ON. It must ship in
++# the wheel so that faiss/__init__.py::_preload_gpu_libs() runs on Windows and
++# registers the CUDA DLL directories (CMake only installs it, setup.py does not
++# copy it by default).
++if os.path.exists("_gpu_build.py"):
++    shutil.copyfile("_gpu_build.py", "faiss/_gpu_build.py")
+ 
+ if platform.system() != "AIX":
+     ext = ".pyd" if platform.system() == "Windows" else ".so"

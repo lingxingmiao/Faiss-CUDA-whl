@@ -1,0 +1,397 @@
+name: faiss-cuda-wheels
+
+# 目的：自动构建“全 CUDA 架构”的 faiss GPU 预编译包（含 sm_60 P100 / sm_70 V100，
+# 这是 conda-forge 与 PyPI 的 faiss-gpu 构建里缺失的架构）。
+# 上游 faiss 发一版 -> 这里构建一版；已发布过的版本自动跳过。
+
+on:
+  schedule:
+    - cron: "17 3 * * *"        # 每天 03:17 UTC 检查一次上游是否发新版
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "faiss 标签（如 v1.14.3），留空 = 上游最新 release"
+        required: false
+        default: ""
+      force:
+        description: "强制重建（即使本仓库已发布该版本）"
+        type: boolean
+        default: false
+      cuda:
+        description: "CUDA 版本列表（逗号分隔，必须 < 13）"
+        required: false
+        default: "12.9.0,12.6.3"
+      python:
+        description: "Python 版本列表（逗号分隔）"
+        required: false
+        default: "3.10,3.11,3.12,3.13"
+      arch_mode:
+        description: "CUDA 架构范围（major=每个大版本一个 cubin，覆盖最全且构建最快）"
+        type: choice
+        options: ["major", "min60", "all"]
+        default: "major"
+      bundle_cuda:
+        description: "额外产出“全打包”wheel（内含 CUDA 运行时，约 1GB）"
+        type: boolean
+        default: false
+      strict_patches:
+        description: "补丁不适用时直接失败"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-faiss-cuda.yml"
+      - ".github/patches/**"
+      - "scripts/**"
+  repository_dispatch:
+    types: [upstream-release]
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: facebookresearch/faiss
+  PYTHONUTF8: "1"
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1) 决定构建哪个 faiss 版本 & 生成矩阵
+  # --------------------------------------------------------------------------
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      build: ${{ steps.plan.outputs.build }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Plan
+        id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_FORCE: ${{ inputs.force }}
+          IN_CUDA: ${{ inputs.cuda }}
+          IN_PYTHON: ${{ inputs.python }}
+          IN_ARCH_MODE: ${{ inputs.arch_mode }}
+        run: python scripts/plan_build.py
+      - name: Summary
+        run: |
+          {
+            echo "### 构建计划"
+            echo ""
+            echo "- faiss: \`${{ steps.plan.outputs.version }}\`"
+            echo "- 需要构建: \`${{ steps.plan.outputs.build }}\`"
+            echo "- 矩阵: \`${{ steps.plan.outputs.matrix }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # --------------------------------------------------------------------------
+  # 2) Windows 上构建；矩阵 = CUDA 版本 × Python 版本
+  # --------------------------------------------------------------------------
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+    name: cu${{ matrix.cuda_short }} / py${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: BLAS 提供者 (conda-forge openblas)
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: blas
+          create-args: >-
+            openblas
+          condarc: |
+            channels:
+              - conda-forge
+            channel_priority: strict
+
+      - name: Locate OpenBLAS
+        id: blas
+        shell: pwsh
+        run: |
+          $lib = Get-ChildItem -Recurse -Filter openblas.lib -Path $env:MAMBA_ROOT_PREFIX -ErrorAction Stop |
+                 Select-Object -First 1
+          if (-not $lib) { throw "openblas.lib not found under $env:MAMBA_ROOT_PREFIX" }
+          $libDir = Split-Path $lib.FullName            # ...\Library\lib
+          $binDir = Join-Path (Split-Path $libDir) "bin" # ...\Library\bin
+          "lib=$($lib.FullName)"                        | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          "bin=$binDir"                                 | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          Write-Host "openblas.lib : $($lib.FullName)"
+          Write-Host "openblas.dll : $binDir"
+
+      - name: 安装构建依赖
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install numpy packaging swig delvewheel
+
+      - name: 安装 CUDA ${{ matrix.cuda }}
+        id: cuda
+        uses: Jimver/cuda-toolkit@v0.2.23
+        with:
+          cuda: ${{ matrix.cuda }}
+          method: network
+          use-gpu-driver: false
+
+      - name: 固定 MSVC 工具集 ${{ matrix.toolset }}
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          toolset: ${{ matrix.toolset }}
+
+      - name: 固定 git 行尾（避免 autocrlf 改写补丁内容）
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: 拉取 faiss ${{ needs.plan.outputs.version }} 并打补丁
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch "${{ needs.plan.outputs.version }}" `
+            https://github.com/${{ env.UPSTREAM_REPO }}.git src
+          git -C src log --oneline -1
+          python scripts/apply_patches.py --src src --patches .github/patches `
+            --strict ${{ inputs.strict_patches || 'false' }}
+
+      - name: 计算 CUDA 架构列表
+        id: archs
+        shell: pwsh
+        run: |
+          $archs = python scripts/cuda_archs.py --mode ${{ matrix.arch_mode }} --require 60,70
+          if ($LASTEXITCODE -ne 0) { throw "cuda_archs.py failed" }
+          "archs=$archs" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          Write-Host "CUDA archs: $archs"
+
+      - name: CMake 配置
+        shell: pwsh
+        env:
+          BLAS_LIB: ${{ steps.blas.outputs.lib }}
+          BLAS_BIN: ${{ steps.blas.outputs.bin }}
+        run: |
+          $cudaRoot = $env:CUDA_PATH
+          if (-not $cudaRoot) { $cudaRoot = (Get-ChildItem 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' | Sort-Object Name -Descending | Select-Object -First 1).FullName }
+          $env:CUDACXX = Join-Path $cudaRoot 'bin\nvcc.exe'
+          $env:CUDAToolkit_ROOT = $cudaRoot
+          Write-Host "CUDA_PATH = $cudaRoot"
+          cmake -S src -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_CUDA_COMPILER="$cudaRoot/bin/nvcc.exe" `
+            -DCMAKE_CUDA_ARCHITECTURES="${{ steps.archs.outputs.archs }}" `
+            -DCMAKE_CUDA_STANDARD=17 `
+            -DCUDAToolkit_ROOT="$cudaRoot" `
+            -DFAISS_ENABLE_GPU=ON `
+            -DFAISS_ENABLE_PYTHON=ON `
+            -DFAISS_ENABLE_C_API=ON `
+            -DBUILD_SHARED_LIBS=ON `
+            -DBUILD_TESTING=OFF `
+            -DBLA_VENDOR=OpenBLAS `
+            -DBLAS_LIBRARIES="$env:BLAS_LIB" `
+            -DLAPACK_LIBRARIES="$env:BLAS_LIB" `
+            -DCMAKE_PREFIX_PATH="$(Split-Path (Split-Path $env:BLAS_LIB))"
+
+      - name: 编译 libfaiss (含 CUDA 内核) 与 python 绑定
+        shell: pwsh
+        run: |
+          cmake --build build --target faiss faiss_c swigfaiss --parallel $env:NUMBER_OF_PROCESSORS
+
+      - name: 校验 faiss.dll 架构
+        shell: pwsh
+        run: |
+          python scripts/verify_artifact.py --dll build/faiss/faiss.dll `
+            --require 60,70 --min-archs 4
+
+      - name: 构建 wheel
+        shell: pwsh
+        env:
+          FAISS_VER: ${{ needs.plan.outputs.version }}
+          CUDA_TAG: ${{ matrix.cuda_tag }}
+        run: |
+          $ver = $env:FAISS_VER.TrimStart('v')
+          cd build/faiss/python
+          # 重写发行版标识，避免不同 CUDA 版本的产物重名（PyTorch 风格的 local version）
+          (Get-Content setup.py) `
+            -replace 'name="faiss"', "name=`"faiss_gpu_$($env:CUDA_TAG)`"" `
+            -replace 'version="[^"]*"', "version=`"$ver+$($env:CUDA_TAG)`"" |
+            Set-Content -Encoding utf8 setup.py
+          Select-String -Path setup.py -Pattern 'name=|version=' | Select-Object -First 2
+          python setup.py bdist_wheel
+          Get-ChildItem dist
+
+      - name: 精简 wheel（CUDA 运行时由系统 / nvidia-*-cu12 提供）
+        shell: pwsh
+        env:
+          BLAS_BIN: ${{ steps.blas.outputs.bin }}
+        run: |
+          $raw = (Get-ChildItem build/faiss/python/dist/*.whl | Select-Object -First 1).FullName
+          python -m delvewheel repair $raw `
+            --add-path "$env:BLAS_BIN" `
+            --exclude "cublas64_*" --exclude "cublasLt64_*" --exclude "cudart64_*" `
+            --exclude "curand64_*" --exclude "nvrtc64_*" --exclude "nvJitLink*" `
+            --exclude "nppi*" --exclude "npp*" --exclude "cufft64_*" `
+            --exclude "cusparse64_*" --exclude "cusolver64_*" `
+            -w wheelhouse-light
+          Get-ChildItem wheelhouse-light
+
+      - name: 全打包 wheel（可选，内嵌 CUDA 运行时）
+        if: ${{ inputs.bundle_cuda }}
+        shell: pwsh
+        env:
+          BLAS_BIN: ${{ steps.blas.outputs.bin }}
+          CUDA_TAG: ${{ matrix.cuda_tag }}
+        run: |
+          # 独立发行版名（版本后缀 +.full），否则与精简 wheel 同名会互相覆盖
+          Copy-Item -Recurse -Force build/faiss/python build/faiss/python_full
+          (Get-Content build/faiss/python_full/setup.py) `
+            -replace '\+cu\d+', "+$($env:CUDA_TAG).full" `
+            | Set-Content -Encoding utf8 build/faiss/python_full/setup.py
+          Select-String -Path build/faiss/python_full/setup.py -Pattern 'version=' | Select-Object -First 1
+          Push-Location build/faiss/python_full
+          python setup.py bdist_wheel
+          Pop-Location
+          $raw = (Get-ChildItem build/faiss/python_full/dist/*.whl | Select-Object -First 1).FullName
+          python -m delvewheel repair $raw `
+            --add-path "$env:BLAS_BIN" --add-path "$env:CUDA_PATH/bin" `
+            -w wheelhouse-full
+          Get-ChildItem wheelhouse-full
+
+      - name: 组装产物（wheel + conda 落地 dll zip + 构建信息）
+        shell: pwsh
+        env:
+          BLAS_BIN: ${{ steps.blas.outputs.bin }}
+          FAISS_VER: ${{ needs.plan.outputs.version }}
+          CUDA_TAG: ${{ matrix.cuda_tag }}
+        run: |
+          $ver = $env:FAISS_VER.TrimStart('v')
+          $pyTag = python -c "import sys;print('cp%d%d'%sys.version_info[:2])"
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+
+          $light = Get-ChildItem wheelhouse-light/*.whl | Select-Object -First 1
+          Copy-Item $light.FullName out/
+          Get-ChildItem wheelhouse-full/*.whl -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName out/ }
+
+          # conda / 已有 faiss 环境可直接用 faiss.dll 覆盖（见 zip 内 README）
+          $dllDir = Join-Path $env:RUNNER_TEMP "dllzip"
+          New-Item -ItemType Directory -Force -Path $dllDir | Out-Null
+          Copy-Item build/faiss/faiss.dll $dllDir/
+          Copy-Item (Join-Path $env:BLAS_BIN "openblas.dll") $dllDir/
+          # 注意：不用 here-string，其内容必须顶格会破坏 YAML 块标量
+          $note = @(
+            "faiss $ver GPU (CUDA ${{ matrix.cuda_short }}) - Windows x64 落地包"
+            "========================================================="
+            "文件:"
+            "  faiss.dll     自编译 libfaiss（含 sm_60/sm_70 等全部 CUDA 架构）"
+            "  openblas.dll  该 DLL 链接的 BLAS（conda 官方版链接的是 MKL 的 libblas.dll）"
+            ""
+            "用法（conda 环境 / 已有 faiss 的 Python 环境）:"
+            "  1. 备份原 DLL:"
+            "     copy /y `"%CONDA_PREFIX%\Library\bin\faiss.dll`" `"%CONDA_PREFIX%\Library\bin\faiss.dll.bak`""
+            "  2. 覆盖:"
+            "     copy /y faiss.dll    `"%CONDA_PREFIX%\Library\bin\faiss.dll`""
+            "     copy /y openblas.dll `"%CONDA_PREFIX%\Library\bin\openblas.dll`""
+            "  3. 验证:"
+            "     python -c `"import faiss;print(faiss.__version__, faiss.get_num_gpus())`""
+            ""
+            "要求: CUDA ${{ matrix.cuda_short }} 运行时（cudart64_12/cublas64_12/curand64_10）"
+            "      在 PATH 中，或使用 pip 包 nvidia-cuda-runtime-cu12 / nvidia-cublas-cu12 /"
+            "      nvidia-curand-cu12（faiss/__init__.py 会自动 add_dll_directory）。"
+            "注意: _swigfaiss.pyd 无需替换，符号与 conda 版 python 绑定兼容。"
+          ) -join "`r`n"
+          Set-Content -Path (Join-Path $dllDir "README.txt") -Value $note -Encoding utf8
+          Compress-Archive -Path "$dllDir/*" `
+            -DestinationPath "faiss-$ver-cuda$($env:CUDA_TAG)-$pyTag-win64-dll.zip"
+
+          $info = @(
+            "faiss    : $env:FAISS_VER"
+            "cuda     : ${{ matrix.cuda }}"
+            "arch     : ${{ steps.archs.outputs.archs }}"
+            "python   : ${{ matrix.python }}"
+            "msvc     : ${{ matrix.toolset }}"
+            "runner   : ${{ runner.os }}-${{ runner.arch }}"
+          ) -join "`r`n"
+          Set-Content -Path out/BUILD-INFO.txt -Value $info -Encoding utf8
+          Get-ChildItem out
+
+      - name: 运行时冒烟测试（精简 wheel）
+        shell: pwsh
+        run: |
+          python -m pip install --force-reinstall --no-deps (Get-ChildItem wheelhouse-light/*.whl)
+          python -c "import faiss;print('light  import OK', faiss.__version__, 'gpus', faiss.get_num_gpus())"
+          python scripts/verify_artifact.py --wheel (Get-ChildItem wheelhouse-light/*.whl | Select-Object -First 1).FullName
+
+      - name: 运行时冒烟测试（全打包 wheel，PATH 中移除 CUDA）
+        if: ${{ inputs.bundle_cuda }}
+        shell: pwsh
+        run: |
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and ($_ -notlike "$env:CUDA_PATH*") }) -join ';'
+          $whl = (Get-ChildItem wheelhouse-full/*.whl | Select-Object -First 1).FullName
+          python -m pip install --force-reinstall --no-deps $whl
+          python -c "import faiss;print('full   import OK', faiss.__version__, 'gpus', faiss.get_num_gpus())"
+          python scripts/verify_artifact.py --wheel $whl --expect-bundled-cuda
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: faiss-${{ matrix.cuda_tag }}-${{ matrix.py_tag }}
+          path: |
+            out/*.whl
+            out/BUILD-INFO.txt
+            faiss-*-win64-dll.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  # --------------------------------------------------------------------------
+  # 3) 汇总发布到 GitHub Release
+  # --------------------------------------------------------------------------
+  release:
+    needs: [plan, build]
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: 列表
+        run: ls -lh dist
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: faiss-${{ needs.plan.outputs.version }}
+          name: faiss ${{ needs.plan.outputs.version }} · CUDA builds (sm_60~sm_120)
+          body: |
+            Windows x64 预编译包，由 GitHub Actions 自动构建（上游 faiss 发新版即自动重建）。
+
+            * 架构包含 **sm_60 (P100) / sm_70 (V100)** 等全部 CUDA 架构 —— conda-forge 与 PyPI 的
+              faiss-gpu 构建缺失这两档，导致 `CUDA error 209 no kernel image is available`。
+            * `faiss_gpu_<cuXXX>-<ver>+cuXXX-*.whl`：精简版 wheel，CUDA 运行时由系统 CUDA
+              （PATH）或 pip 的 `nvidia-*-cu12` 提供（`faiss/__init__.py` 会自动注册 DLL 目录）。
+            * `faiss-<ver>-cuda<cuXXX>-cp3XX-win64-dll.zip`：给 conda / 已有 faiss 环境的落地包，
+              直接替换 `%CONDA_PREFIX%\Library\bin\faiss.dll`（附 openblas.dll 与说明；
+              DLL 与 Python 版本无关，文件名带 py 标签只为区分矩阵产物）。
+            * `faiss_gpu_<cuXXX>-<ver>+<cuXXX>.full-*.whl`：勾选 `bundle_cuda` 时才产出的全打包 wheel。
+            * 需要完全离线自足时，用 workflow_dispatch 勾选 `bundle_cuda` 产出内嵌 CUDA 运行时的 wheel。
+
+            **CUDA 13 不参与构建**：CUDA 13 已移除 sm_60/sm_70 支持。
+            构建矩阵、补丁与验证方式见仓库 README 与 `BUILD-INFO.txt`。
+          files: dist/*
+          fail_on_unmatched_files: false
