@@ -497,7 +497,10 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     needs: [plan, build]
-    if: needs.plan.outputs.build == 'true'
+    # 必须带 always(): needs 里有任意 job 失败时 GitHub 会直接跳过依赖它的 job,
+    # 光写 needs.plan.outputs.build == 'true' 挡不住 —— 之前 20 个 job 成功、
+    # 5 个 cu11.8 失败, 结果 release 整段被跳过, 一个产物都没发出去。
+    if: ${{ always() && needs.plan.outputs.build == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
