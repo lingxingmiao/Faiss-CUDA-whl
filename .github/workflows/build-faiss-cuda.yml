@@ -137,27 +137,20 @@ jobs:
               - conda-forge
             channel_priority: strict
 
-      # micromamba 的 action 只在 bash 里做激活，pwsh 步骤里 `micromamba` 不在 PATH；
-      # 这里把真实可执行文件包一层放进 PATH，后续步骤照旧写 `micromamba run ...` 即可。
-      - name: 注册 micromamba 到 PATH
-        shell: pwsh
-        run: |
-          $mm = $env:MAMBA_EXE
-          if (-not $mm) { $mm = (Get-Command micromamba -ErrorAction SilentlyContinue).Source }
-          if (-not $mm) { throw "micromamba executable not found" }
-          $dir = Join-Path $env:RUNNER_TEMP "mambabin"
-          New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          Set-Content -Path (Join-Path $dir "micromamba.cmd") `
-            -Value "@echo off`r`n`"$mm`" %*" -Encoding ascii
-          $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
-          Write-Host "micromamba -> $mm"
-
       - name: 解析环境路径
         id: env
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $prefix = (micromamba run -n build python -c "import sys;print(sys.prefix)").Trim()
+          # micromamba 的 action 只在 bash 里激活；pwsh 里必须显式用 MAMBA_EXE，
+          # 否则 `micromamba` 可能解析到别的 shim 而把参数当成命令执行。
+          $mm = $env:MAMBA_EXE
+          if (-not $mm -or -not (Test-Path $mm)) {
+            $mm = (Get-Command micromamba -ErrorAction SilentlyContinue).Source
+          }
+          if (-not $mm) { throw "micromamba executable not found" }
+          Write-Host "micromamba: $mm"
+          $prefix = (& "${{ steps.env.outputs.mm }}" run -n build python -c "import sys;print(sys.prefix)").Trim()
           Write-Host "prefix: $prefix"
           function Find-1($name) {
             (Get-ChildItem -Recurse -Filter $name -Path $prefix -ErrorAction SilentlyContinue |
@@ -188,14 +181,15 @@ jobs:
           "cuda_bin=$cudaBin" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           "nvcc=$nvcc"        | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           "cuobjdump=$cuobj"  | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-          "blaslib=$blas"     | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-          micromamba run -n build nvcc --version | Select-String "release"
+          "blaslib=$blas"
+          "mm=$mm"     | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          & $mm run -n build nvcc --version | Select-String "release"
 
       - name: 安装 python 构建依赖
         shell: pwsh
         run: |
-          micromamba run --no-capture-output -n build python -m pip install --upgrade pip setuptools wheel
-          micromamba run --no-capture-output -n build python -m pip install numpy packaging swig delvewheel
+          & "${{ steps.env.outputs.mm }}" run --no-capture-output -n build python -m pip install --upgrade pip setuptools wheel
+          & "${{ steps.env.outputs.mm }}" run --no-capture-output -n build python -m pip install numpy packaging swig delvewheel
 
       - name: 固定 git 行尾（避免 autocrlf 改写补丁内容）
         shell: pwsh
@@ -209,14 +203,14 @@ jobs:
           git clone --depth 1 --branch "${{ needs.plan.outputs.version }}" `
             https://github.com/${{ env.UPSTREAM_REPO }}.git src
           git -C src log --oneline -1
-          micromamba run --no-capture-output -n build python scripts/apply_patches.py `
+          & "${{ steps.env.outputs.mm }}" run --no-capture-output -n build python scripts/apply_patches.py `
             --src src --patches .github/patches --strict ${{ inputs.strict_patches || 'false' }}
 
       - name: 计算 CUDA 架构列表
         id: archs
         shell: pwsh
         run: |
-          $archs = micromamba run -n build python scripts/cuda_archs.py `
+          $archs = & "${{ steps.env.outputs.mm }}" run -n build python scripts/cuda_archs.py `
             --mode ${{ matrix.arch_mode }} --nvcc "${{ steps.env.outputs.nvcc }}" --require 60,70
           if ($LASTEXITCODE -ne 0) { throw "cuda_archs.py failed" }
           "archs=$archs" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
@@ -228,7 +222,7 @@ jobs:
           $env:CUDACXX = "${{ steps.env.outputs.nvcc }}"
           $env:CUDAToolkit_ROOT = "${{ steps.env.outputs.prefix }}\Library"
           $env:CUDA_PATH = "${{ steps.env.outputs.prefix }}\Library"
-          micromamba run --no-capture-output -n build cmake -S src -B build -G Ninja `
+          & "${{ steps.env.outputs.mm }}" run --no-capture-output -n build cmake -S src -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_COMPILER=cl.exe -DCMAKE_CXX_COMPILER=cl.exe `
             -DCMAKE_CUDA_COMPILER="${{ steps.env.outputs.nvcc }}" `
@@ -247,13 +241,13 @@ jobs:
       - name: 编译 libfaiss（含 CUDA 内核）与 python 绑定
         shell: pwsh
         run: |
-          micromamba run --no-capture-output -n build cmake --build build `
+          & "${{ steps.env.outputs.mm }}" run --no-capture-output -n build cmake --build build `
             --target faiss faiss_c swigfaiss --parallel $env:NUMBER_OF_PROCESSORS
 
       - name: 校验 faiss.dll 架构
         shell: pwsh
         run: |
-          micromamba run --no-capture-output -n build python scripts/verify_artifact.py `
+          & "${{ steps.env.outputs.mm }}" run --no-capture-output -n build python scripts/verify_artifact.py `
             --dll build/faiss/faiss.dll --cuobjdump "${{ steps.env.outputs.cuobjdump }}" `
             --require 60,70 --min-archs 4
 
@@ -271,14 +265,14 @@ jobs:
             -replace 'version="[^"]*"', "version=`"$ver+$($env:CUDA_TAG)`"" |
             Set-Content -Encoding utf8 setup.py
           Select-String -Path setup.py -Pattern 'name=|version=' | Select-Object -First 2
-          micromamba run --no-capture-output -n build python setup.py bdist_wheel
+          & "${{ steps.env.outputs.mm }}" run --no-capture-output -n build python setup.py bdist_wheel
           Get-ChildItem dist
 
       - name: 精简 wheel（CUDA 运行时由系统 / nvidia-*-cu12 提供）
         shell: pwsh
         run: |
           $raw = (Get-ChildItem build/faiss/python/dist/*.whl | Select-Object -First 1).FullName
-          micromamba run --no-capture-output -n build python -m delvewheel repair $raw `
+          & "${{ steps.env.outputs.mm }}" run --no-capture-output -n build python -m delvewheel repair $raw `
             --add-path "${{ steps.env.outputs.bin }}" `
             --exclude "cublas64_*" --exclude "cublasLt64_*" --exclude "cudart64_*" `
             --exclude "curand64_*" --exclude "nvrtc64_*" --exclude "nvJitLink*" `
@@ -299,10 +293,10 @@ jobs:
             -replace '\+cu\d+', "+$($env:CUDA_TAG).full" `
             | Set-Content -Encoding utf8 build/faiss/python_full/setup.py
           Push-Location build/faiss/python_full
-          micromamba run --no-capture-output -n build python setup.py bdist_wheel
+          & "${{ steps.env.outputs.mm }}" run --no-capture-output -n build python setup.py bdist_wheel
           Pop-Location
           $raw = (Get-ChildItem build/faiss/python_full/dist/*.whl | Select-Object -First 1).FullName
-          micromamba run --no-capture-output -n build python -m delvewheel repair $raw `
+          & "${{ steps.env.outputs.mm }}" run --no-capture-output -n build python -m delvewheel repair $raw `
             --add-path "${{ steps.env.outputs.bin }}" `
             --add-path "${{ steps.env.outputs.cuda_bin }}" `
             -w wheelhouse-full
