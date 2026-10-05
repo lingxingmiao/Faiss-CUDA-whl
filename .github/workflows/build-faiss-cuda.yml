@@ -425,8 +425,10 @@ jobs:
             "注意: _swigfaiss.pyd 无需替换，符号与 conda 版 python 绑定兼容。"
           ) -join "`r`n"
           Set-Content -Path (Join-Path $dllDir "README.txt") -Value $note -Encoding utf8
+          # 全部产物都放进 out/: upload-artifact 会按"公共父目录"保留结构, 若 zip 落在仓库根,
+          # artifact 里就会变成 out/xxx.whl + xxx.zip 两级, release 的 dist/* 只匹配得到 zip。
           Compress-Archive -Path "$dllDir/*" `
-            -DestinationPath "faiss-$ver-cuda$($env:CUDA_TAG)-$pyTag-win64-dll.zip"
+            -DestinationPath "out/faiss-$ver-cuda$($env:CUDA_TAG)-$pyTag-win64-dll.zip"
 
           $info = @(
             "faiss    : $env:FAISS_VER"
@@ -482,10 +484,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: faiss-${{ matrix.cuda_tag }}-${{ matrix.py_tag }}
-          path: |
-            out/*.whl
-            out/BUILD-INFO.txt
-            faiss-*-win64-dll.zip
+          path: out/*
           if-no-files-found: error
           retention-days: 30
 
@@ -504,7 +503,12 @@ jobs:
           path: dist
           merge-multiple: true
       - name: 列表
-        run: ls -lh dist
+        run: |
+          ls -lh dist
+          # 产物若被 artifact 套进子目录, dist/* 就匹配不到, 这里直接失败而不是静默少发文件
+          count=$(find dist -maxdepth 1 -type f | wc -l)
+          echo "root files: $count"
+          test "$count" -ge 2
       - name: 发布
         uses: softprops/action-gh-release@v2
         with:
