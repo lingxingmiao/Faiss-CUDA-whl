@@ -130,6 +130,7 @@ jobs:
             cuda-version=${{ matrix.cuda_short }}
             cuda-nvcc
             cuda-cudart-dev
+            cuda-profiler-api
             cuda-cuobjdump
             libcublas-dev
             libcurand-dev
@@ -192,6 +193,14 @@ jobs:
           }
           $bin = Split-Path $blasDll
           $cudaBin = if ($cudart) { Split-Path $cudart } else { $bin }
+          # conda 的 CUDA 是拆包安装的, 少一个包就会在编译到某个 .cu 时才报缺头文件
+          # (曾经是 cuda_profiler_api.h, 由 cuda-profiler-api 提供)。这里提前查一遍。
+          foreach ($h in @("cuda.h", "cuda_runtime.h", "cuda_profiler_api.h",
+                           "cublas_v2.h", "curand_kernel.h")) {
+            if (-not (Find-1 $h)) {
+              throw "缺少 CUDA 头文件 $h; 检查 create-args (cuda-cudart-dev / cuda-profiler-api / libcublas-dev / libcurand-dev)"
+            }
+          }
           "prefix=$prefix"    | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           "bin=$bin"          | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           "cuda_bin=$cudaBin" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
