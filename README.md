@@ -83,12 +83,22 @@ repository_dispatch                                    多 CUDA × 多 PY   tag:
 
 | 值 | 生成 | 含义 |
 | --- | --- | --- |
-| `major`（默认） | `60;70;80;90;100;120` + `120-virtual` | 每个大版本只留最低小版本。SASS 在同一大版本内向下兼容，因此 `sm_60` 覆盖 sm_61/62、`sm_70` 覆盖 sm_72/75 —— **覆盖全部 GPU 且构建最快** |
-| `min60` | 全部 ≥ sm_60 的架构（16 个） | 最全但要编译 16 份内核，DLL 极大、耗时明显 |
-| `all` | nvcc 支持的一切 | 含 Maxwell 等远古架构 |
+| `major`（默认） | 每个大版本一个 cubin，如 cu129 是 `50;60;70;80;90`（+`90-virtual`） | SASS 在同一大版本内小号向前兼容，所以 `sm_50` 覆盖 5.2/5.3、`sm_60` 覆盖 6.1/6.2、`sm_70` 覆盖 7.2/7.5 —— **一张 wheel 就能从 Maxwell 一路盖到 Hopper**。最低档由矩阵里的 `min_sm` 决定：cu118 = 35（GTX 780/Titan/K80），cu12x = 50（**GTX 745/750/900 系**起步） |
+| `min60` | 全部 ≥ sm_60 的架构 | 从 Pascal 起，每档都出原生 cubin |
+| `all` | nvcc 支持的一切 | cu12.9 上是 19 档（`sm_50`…`sm_121`）；小号架构本来靠 minor 向前兼容，一般用 `major` 就够 |
 | 显式列表，如 `60,70` | `60-real;70-real;70-virtual` | 每个架构一趟 nvcc，构建时间与架构数成正比。只想跑 P100/V100 时用它（CI 上能省几倍时间），`--require` 仍会挡住写错的架构 |
 
-> 构建时间基本等于「架构数 × 一遍完整 faiss CUDA 编译」，第一次跑通建议先 `arch_mode=60,70`。
+> 构建时间基本等于「架构数 × 一遍完整 faiss CUDA 编译」（实测 3 趟 ≈ 25 分钟，7 趟 ≈ 50 分钟）。
+>
+> **为什么默认封在 sm_90（`ARCH_MAX_SM = 90`）**：cu12.8/12.9 的 nvcc 能编 `sm_100/103/120`
+> （Blackwell），但那批 CCCL 头文件（`cuda/__ptx/.../clusterlaunchcontrol.h`）在当前
+> nvcc + MSVC 组合下会报 `asm operand type size(4) does not match type/size implied by
+> constraint 'l'`。封在 90 后 Blackwell 显卡（RTX 50 系 / B200）仍能用，靠的是 `90-virtual`
+> 的 PTX 由驱动 JIT；等 CCCL 修好把 `ARCH_MAX_SM` 改成 `0` 即可解封。
+>
+> **GTX 600 系（Kepler GK104 = sm_30）编不了**：`sm_30` 在 CUDA 11.0 就被移除，11.8 里最老
+> 只剩 `sm_35`（GK110：GTX 780/Ti、Titan、Tesla K80），12.x 里最老是 `sm_50`。这类卡只能用
+> CPU（TranslatorMinecraft 里会自动回退，不会崩）。
 
 工具链来源（保证可复现，不依赖第三方 action 的版本表）：
 

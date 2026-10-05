@@ -177,7 +177,7 @@ jobs:
           $cuobj   = Find-1 "cuobjdump.exe"
           $blas    = Find-1 "openblas.lib"
           $blasDll = Find-1 "openblas.dll"
-          $cudart  = Find-1 "cudart64_12.dll"
+          $cudart  = Find-1 "cudart64_*.dll"   # 11.x 是 cudart64_11.dll, 12.x 是 cudart64_12.dll
           Write-Host "nvcc     : $nvcc"
           Write-Host "cuobjdump: $cuobj"
           Write-Host "openblas : $blas / $blasDll"
@@ -247,7 +247,8 @@ jobs:
           $out = Join-Path $env:RUNNER_TEMP "cuda-archs.txt"
           Remove-Item -Force $out -ErrorAction SilentlyContinue
           python scripts/cuda_archs.py `
-            --mode ${{ matrix.arch_mode }} --nvcc "${{ steps.env.outputs.nvcc }}" `
+            --mode ${{ matrix.arch_mode }} --min-sm ${{ matrix.min_sm }} --max-sm ${{ matrix.max_sm }} `
+            --nvcc "${{ steps.env.outputs.nvcc }}" `
             --require 60,70 --out "$out"
           if ($LASTEXITCODE -ne 0) { throw "cuda_archs.py failed" }
           if (-not (Test-Path $out)) { throw "cuda_archs.py wrote no arch list" }
@@ -398,37 +399,38 @@ jobs:
           Get-ChildItem wheelhouse-full/*.whl -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Item $_.FullName out/ }
 
-          # conda / 已有 faiss 环境的落地包
-          $dllDir = Join-Path $env:RUNNER_TEMP "dllzip"
-          New-Item -ItemType Directory -Force -Path $dllDir | Out-Null
-          Copy-Item build/faiss/faiss.dll $dllDir/
-          Copy-Item (Join-Path "${{ steps.env.outputs.bin }}" "openblas.dll") $dllDir/
-          $note = @(
-            "faiss $ver GPU (CUDA ${{ matrix.cuda_short }}) - Windows x64 落地包"
-            "========================================================="
-            "文件:"
-            "  faiss.dll     自编译 libfaiss（含 sm_60/sm_70 等全部 CUDA 架构）"
-            "  openblas.dll  该 DLL 链接的 BLAS（conda 官方版链接的是 MKL 的 libblas.dll）"
-            ""
-            "用法（conda 环境 / 已有 faiss 的 Python 环境）:"
-            "  1. 备份原 DLL:"
-            "     copy /y `"%CONDA_PREFIX%\Library\bin\faiss.dll`" `"%CONDA_PREFIX%\Library\bin\faiss.dll.bak`""
-            "  2. 覆盖:"
-            "     copy /y faiss.dll    `"%CONDA_PREFIX%\Library\bin\faiss.dll`""
-            "     copy /y openblas.dll `"%CONDA_PREFIX%\Library\bin\openblas.dll`""
-            "  3. 验证:"
-            "     python -c `"import faiss;print(faiss.__version__, faiss.get_num_gpus())`""
-            ""
-            "要求: CUDA ${{ matrix.cuda_short }} 运行时（cudart64_12/cublas64_12/curand64_10）"
-            "      在 PATH 中，或安装 pip 包 nvidia-cuda-runtime-cu12 / nvidia-cublas-cu12 /"
-            "      nvidia-curand-cu12（faiss/__init__.py 会自动 add_dll_directory）。"
-            "注意: _swigfaiss.pyd 无需替换，符号与 conda 版 python 绑定兼容。"
-          ) -join "`r`n"
-          Set-Content -Path (Join-Path $dllDir "README.txt") -Value $note -Encoding utf8
-          # 全部产物都放进 out/: upload-artifact 会按"公共父目录"保留结构, 若 zip 落在仓库根,
-          # artifact 里就会变成 out/xxx.whl + xxx.zip 两级, release 的 dist/* 只匹配得到 zip。
-          Compress-Archive -Path "$dllDir/*" `
-            -DestinationPath "out/faiss-$ver-cuda$($env:CUDA_TAG)-$pyTag-win64-dll.zip"
+          # conda / 已有 faiss 环境的落地包（与 Python 版本无关, 每条 CUDA 线只出一份）
+          if ("${{ matrix.dll_zip }}" -eq "true") {
+            $dllDir = Join-Path $env:RUNNER_TEMP "dllzip"
+            New-Item -ItemType Directory -Force -Path $dllDir | Out-Null
+            Copy-Item build/faiss/faiss.dll $dllDir/
+            Copy-Item (Join-Path "${{ steps.env.outputs.bin }}" "openblas.dll") $dllDir/
+            $note = @(
+              "faiss $ver GPU (CUDA ${{ matrix.cuda_short }}) - Windows x64 落地包"
+              "========================================================="
+              "文件:"
+              "  faiss.dll     自编译 libfaiss（架构: ${{ steps.archs.outputs.archs }}）"
+              "  openblas.dll  该 DLL 链接的 BLAS（conda 官方版链接的是 MKL 的 libblas.dll）"
+              ""
+              "用法（conda 环境 / 已有 faiss 的 Python 环境）:"
+              "  1. 备份原 DLL:"
+              "     copy /y `"%CONDA_PREFIX%\Library\bin\faiss.dll`" `"%CONDA_PREFIX%\Library\bin\faiss.dll.bak`""
+              "  2. 覆盖:"
+              "     copy /y faiss.dll    `"%CONDA_PREFIX%\Library\bin\faiss.dll`""
+              "     copy /y openblas.dll `"%CONDA_PREFIX%\Library\bin\openblas.dll`""
+              "  3. 验证:"
+              "     python -c `"import faiss;print(faiss.__version__, faiss.get_num_gpus())`""
+              ""
+              "要求: CUDA ${{ matrix.cuda_short }} 运行时（cudart64_*/cublas64_*/curand64_*）"
+              "      在 PATH 中，或安装对应 pip 包 nvidia-*-cu12（faiss/__init__.py 会自动注册）。"
+              "注意: _swigfaiss.pyd 无需替换，符号与 conda 版 python 绑定兼容。"
+            ) -join "`r`n"
+            Set-Content -Path (Join-Path $dllDir "README.txt") -Value $note -Encoding utf8
+            # 全部产物都放进 out/: upload-artifact 会按"公共父目录"保留结构, 若 zip 落在仓库根,
+            # artifact 里就会变成 out/xxx.whl + xxx.zip 两级, release 的 dist/* 只匹配得到 zip。
+            Compress-Archive -Path "$dllDir/*" `
+              -DestinationPath "out/faiss-$ver-cuda$($env:CUDA_TAG)-$pyTag-win64-dll.zip"
+          }
 
           $info = @(
             "faiss    : $env:FAISS_VER"
@@ -438,7 +440,9 @@ jobs:
             "msvc     : runner default toolset"
             "runner   : ${{ runner.os }}-${{ runner.arch }}"
           ) -join "`r`n"
-          Set-Content -Path out/BUILD-INFO.txt -Value $info -Encoding utf8
+          # 名字带 cuda/py 标签: 矩阵里每个 job 都会产出 BUILD-INFO, 同名会互相覆盖
+          Set-Content -Path "out/BUILD-INFO-${{ matrix.cuda_tag }}-${{ matrix.py_tag }}.txt" `
+            -Value $info -Encoding utf8
           Get-ChildItem out
 
       - name: 冒烟测试（精简 wheel + 系统 CUDA 运行时）
@@ -513,12 +517,19 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: faiss-${{ needs.plan.outputs.version }}
-          name: faiss ${{ needs.plan.outputs.version }} · CUDA builds (sm_60~sm_120)
+          name: faiss ${{ needs.plan.outputs.version }} · CUDA 11.8/12.x wheels (sm_35~sm_120)
           body: |
             Windows x64 预编译包，GitHub Actions 自动构建（上游 faiss 发新版即自动重建）。
 
-            * 架构包含 **sm_60 (P100) / sm_70 (V100)** 等全部 CUDA 架构 —— conda-forge 与 PyPI
-              的 faiss-gpu 构建缺失这两档，导致 `CUDA error 209 no kernel image is available`。
+            架构按 CUDA 线各取所需（每个大版本一个 cubin，大版本内小号架构靠 minor 向前兼容）：
+
+            | CUDA 线 | 覆盖显卡 |
+            | --- | --- |
+            | `cu118` | sm_35 起：GTX 780/Ti、Titan、Tesla K80 → 直到 Hopper |
+            | `cu124`/`cu126`/`cu128`/`cu129` | sm_50 起：**GTX 745/750/750Ti、GTX 900 系**、GTX 10 系、V100/T4(7.x)、A100/RTX 30/40(8.x)、H100(9.x) |
+
+            * **GTX 600 系（Kepler GK104，sm_30）编不了**：sm_30 在 CUDA 11.0 就被移除，
+              任何现役工具链都出不了它的内核；这类卡只能用 CPU（项目里会自动回退）。
             * `faiss_gpu_<cuXXX>-<ver>+cuXXX-*.whl`：精简版，CUDA 运行时由系统 CUDA（PATH）
               或 pip 的 `nvidia-*-cu12` 提供（`faiss/__init__.py` 会自动注册 DLL 目录）。
             * `faiss_gpu_<cuXXX>-<ver>+cuXXX.full-*.whl`：勾选 `bundle_cuda` 时产出的全打包版。
@@ -526,7 +537,9 @@ jobs:
               直接替换 `%CONDA_PREFIX%\Library\bin\faiss.dll`（附 openblas.dll 与说明；
               DLL 与 Python 版本无关，文件名带 py 标签只为区分矩阵产物）。
 
-            **CUDA 13 不参与构建**：CUDA 13 已移除 sm_60/sm_70 支持。
-            构建矩阵、补丁与验证方式见仓库 README 与 `BUILD-INFO.txt`。
-          files: dist/*
+            **CUDA 13 不参与构建**：CUDA 13 已移除 sm_50~sm_75（Maxwell/Pascal/Volta）。
+            构建矩阵、补丁与验证方式见仓库 README 与对应的 `BUILD-INFO-*.txt`。
+          files: |
+            dist/*.whl
+            dist/*.zip
           fail_on_unmatched_files: false

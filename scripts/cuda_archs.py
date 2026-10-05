@@ -12,16 +12,20 @@ resulting DLL is really "全 CUDA 架构".
 
 Modes
   major : (default) one cubin per major version, the *lowest* minor of each
-          (60, 70, 80, 90, 100, 120...). SASS is minor-forward compatible
-          within a major, so sm_60 covers sm_61/sm_62 and sm_70 covers
-          sm_72/sm_75 -- full coverage with the fewest kernels (fast build).
+          (50, 60, 70, 80, 90, 100, 120...). SASS is minor-forward compatible
+          within a major, so sm_50 covers sm_52/sm_53, sm_60 covers sm_61/sm_62
+          and sm_70 covers sm_72/sm_75 -- one wheel covers everything from
+          Maxwell (GTX 745/750/900) to Blackwell with 7 cubins.
+          比 --min-sm(默认 50 = nvcc 12 能给的最老一档)更老的会被丢掉。
   min60 : every arch >= sm_60 that the toolkit reports (slow, huge DLL).
-  all   : everything nvcc knows, including ancient archs.
+  all   : everything nvcc knows -- on CUDA 12.9 that is 19 archs starting at
+          sm_50, i.e. 同一大版本的小号架构各来一遍；除非要做"逐档原生"，一般
+          用 major 就够（小号架构靠 minor 向前兼容）。
   <list>: an explicit list, e.g. "60,70" or "70;80" (validated against the
           toolkit). One arch = one nvcc codegen pass, so this is the lever for
           build time: every job compiles the whole of faiss once per arch.
 
-Output: e.g. 60-real;70-real;80-real;90-real;100-real;120-real;121-virtual
+Output: e.g. 50-real;60-real;70-real;80-real;90-real;100-real;120-real;120-virtual
 (`-virtual` on the newest one adds PTX so future GPUs can JIT.)
 """
 import argparse
@@ -85,8 +89,12 @@ def explicit_list(mode, available):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--nvcc", default=None)
-    ap.add_argument("--min-sm", type=int, default=60,
-                    help="drop archs older than this (default 60 = P100)")
+    ap.add_argument("--min-sm", type=int, default=50,
+                    help="major 模式下丢掉比它更老的架构 (默认 50 = Maxwell; "
+                         "CUDA 12 的 nvcc 最老也就到 sm_50, Kepler 那代已经编不了)")
+    ap.add_argument("--max-sm", type=int, default=0,
+                    help="major 模式下丢掉比它更新的架构 (默认 0 = 不封顶; Blackwell 档位"
+                         "在部分 CCCL/MSVC 组合上编不过时可用来封在 90)")
     ap.add_argument("--mode", default="major",
                     help="major / min60 / all / explicit list like 60,70")
     ap.add_argument("--require", default="60,70",
@@ -103,8 +111,14 @@ def main():
 
     mode = args.mode.strip().lower()
     if mode in ("major", "min60", "all"):
-        min_sm = 0 if mode == "all" else args.min_sm
+        # min60 固定 60；major 用 --min-sm/--max-sm(默认 50 起, 不封顶)
+        min_sm = {"all": 0, "min60": 60}.get(mode, args.min_sm)
         kept = [a for a in archs if numeric(a) >= min_sm]
+        if args.max_sm:
+            kept = [a for a in kept if numeric(a) <= args.max_sm]
+        if not kept:
+            raise RuntimeError("no arch in sm_%d..sm_%d of %s"
+                               % (min_sm, args.max_sm or 0, archs))
     else:
         kept = explicit_list(mode, archs)
     if not kept:

@@ -29,6 +29,8 @@ UPSTREAM = "facebookresearch/faiss"
 # nvcc but usually still compiles; use it at your own risk).
 DEFAULT_CUDA = "12.9"
 DEFAULT_PYTHON = "3.10,3.11,3.12,3.13"
+# 0 = 不封顶(会带上 sm_100/103/120); 见 build_matrix 注释
+ARCH_MAX_SM = 90
 
 
 def log(msg=""):
@@ -74,7 +76,16 @@ def cuda_tag(version):
 
 def build_matrix(cuda_versions, python_versions, arch_mode):
     """cuda_versions entries may be '12.9' or '12.9.0'; only major.minor matters
-    because the toolkit comes from conda-forge as `cuda-version=<major.minor>`."""
+    because the toolkit comes from conda-forge as `cuda-version=<major.minor>`.
+
+    min_sm 是每个 CUDA 线能编的最老架构:
+      * 11.x 还带 Kepler(sm_35/sm_37, 已弃用) -> 35, 覆盖 GK110(GTX 780/Titan/K80)
+      * 12.x 的 nvcc 最老只到 sm_50(Maxwell, 如 GTX 745/750/900 系)
+      * sm_30(GTX 680/660 那代 GK104)在 CUDA 11.0 就删了, 任何现代工具链都编不出来
+    max_sm 是上限: 12.8/12.9 的 nvcc 能编 sm_100/103/120(Blackwell), 但那批 CCCL 头文件
+    和 MSVC 内联汇编存在 'asm operand type size(4) does not match ... constraint l' 的冲突,
+    暂时封在 90(Hopper); 以后 CCCL 修好了把 ARCH_MAX_SM 改成 0 即可解封。
+    """
     entries = []
     for cuda in cuda_versions:
         parts = cuda.split(".")
@@ -86,7 +97,8 @@ def build_matrix(cuda_versions, python_versions, arch_mode):
         if major >= 13:
             log("!! skip CUDA %s: CUDA 13 dropped sm_60/sm_70 support" % cuda)
             continue
-        for py in python_versions:
+        min_sm = 35 if major < 12 else 50
+        for idx, py in enumerate(python_versions):
             entries.append({
                 "cuda": short,
                 "cuda_short": short,
@@ -94,6 +106,11 @@ def build_matrix(cuda_versions, python_versions, arch_mode):
                 "python": py,
                 "py_tag": "cp" + py.replace(".", ""),
                 "arch_mode": arch_mode,
+                "min_sm": min_sm,
+                "max_sm": ARCH_MAX_SM,
+                # 落地 dll 与 Python 版本无关, 每条 CUDA 线只出第一个 Python 的那一份,
+                # 免得 release 里躺着 5 份一模一样的 zip
+                "dll_zip": idx == 0,
             })
     return entries
 
