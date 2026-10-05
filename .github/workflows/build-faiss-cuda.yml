@@ -429,7 +429,8 @@ jobs:
             # 全部产物都放进 out/: upload-artifact 会按"公共父目录"保留结构, 若 zip 落在仓库根,
             # artifact 里就会变成 out/xxx.whl + xxx.zip 两级, release 的 dist/* 只匹配得到 zip。
             Compress-Archive -Path "$dllDir/*" `
-              -DestinationPath "out/faiss-$ver-cuda$($env:CUDA_TAG)-$pyTag-win64-dll.zip"
+              # dll 与 Python 版本无关: 名字不带 py 标签, 免得用户以为要挑对应 Python 的那份
+            -DestinationPath "out/faiss-$ver-cuda$($env:CUDA_TAG)-win64-dll.zip"
           }
 
           $info = @(

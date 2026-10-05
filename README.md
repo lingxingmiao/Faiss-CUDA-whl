@@ -30,7 +30,7 @@ sm_53  sm_62  sm_72  sm_75  sm_80  sm_86  sm_89  sm_90      (PTX 仅 sm_90)
 | --- | --- |
 | `faiss_gpu_<cuXXX>-<ver>+cuXXX>-cp3XX-cp3XX-win_amd64.whl` | 精简 wheel：内含 `faiss.dll` / `_swigfaiss.pyd`，`<发行版名>.libs/` 里由 delvewheel 放 `faiss.dll`、`openblas.dll`、`msvcp140.dll`、`vcomp140.dll`；**不含** CUDA 运行时（由系统 CUDA 或 `nvidia-*-cu12` pip 包提供） |
 | `faiss_gpu_<cuXXX>-<ver>+cuXXX.full-cp3XX-cp3XX-win_amd64.whl` | （可选，`bundle_cuda`）内嵌 CUDA 运行时，约 1GB，完全离线可用。**此分支尚未在 CI 实跑验证过** |
-| `faiss-<ver>-cuda<cuXXX>-cp3XX-win64-dll.zip` | conda / 已有 faiss 环境的落地包：`faiss.dll` + `openblas.dll` + README（DLL 与 Python 版本无关，文件名带 py 标签只为区分矩阵产物） |
+| `faiss-<ver>-cuda<cuXXX>-win64-dll.zip` | conda / 已有 faiss 环境的落地包：`faiss.dll` + `openblas.dll` + README。**与 Python 版本无关**（`faiss.dll` 是 C++ DLL），所以每条 CUDA 线只出一份；跟 Python 绑定的是 wheel 里的 `_swigfaiss.pyd` |
 
 轮子内的 `faiss/_gpu_build.py` 标记 + 补丁 0003 让 Windows 下自动
 `os.add_dll_directory()` 到 `nvidia/{cuda_runtime,cublas,curand,nvjitlink}/bin` 与 `CUDA_PATH\bin`。
