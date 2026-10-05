@@ -150,7 +150,13 @@ jobs:
           }
           if (-not $mm) { throw "micromamba executable not found" }
           Write-Host "micromamba: $mm"
-          $prefix = (& "${{ steps.env.outputs.mm }}" run -n build python -c "import sys;print(sys.prefix)").Trim()
+          $pyOut = & $mm run -n build python -c "import sys;print(sys.prefix)"
+          $prefix = (($pyOut | Where-Object { $_ }) | Select-Object -Last 1)
+          if ($prefix) { $prefix = "$prefix".Trim() }
+          if (-not $prefix) {
+            Write-Host "micromamba output: $($pyOut -join ' | ')"
+            throw "could not resolve the build env prefix"
+          }
           Write-Host "prefix: $prefix"
           function Find-1($name) {
             (Get-ChildItem -Recurse -Filter $name -Path $prefix -ErrorAction SilentlyContinue |
