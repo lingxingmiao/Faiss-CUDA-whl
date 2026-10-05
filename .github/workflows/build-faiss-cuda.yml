@@ -19,13 +19,13 @@ on:
         type: boolean
         default: false
       cuda:
-        description: "CUDA 主版本列表（逗号分隔，必须 < 13）"
+        description: "CUDA 主版本列表（逗号分隔，必须 < 13；默认只出 12.6/12.9 两条线）"
         required: false
-        default: "12.9,12.6"
+        default: "12.6,12.9"
       python:
         description: "Python 版本列表（逗号分隔）"
         required: false
-        default: "3.10,3.11,3.12,3.13"
+        default: "3.10,3.11,3.12,3.13,3.14"
       arch_mode:
         description: "CUDA 架构范围 major / min60 / all / 或显式列表如 60,70（每多一个架构多一趟 nvcc，构建时间线性增长）"
         required: false

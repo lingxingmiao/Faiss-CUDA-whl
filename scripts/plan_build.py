@@ -27,8 +27,8 @@ UPSTREAM = "facebookresearch/faiss"
 # nvcc's -allow-unsupported-compiler instead, which is what makes 12.9 work with
 # the runner's default toolset (12.6 with a 14.4x toolset is unsupported by
 # nvcc but usually still compiles; use it at your own risk).
-DEFAULT_CUDA = "12.9"
-DEFAULT_PYTHON = "3.10,3.11,3.12,3.13"
+DEFAULT_CUDA = "12.6,12.9"
+DEFAULT_PYTHON = "3.10,3.11,3.12,3.13,3.14"
 # 0 = 不封顶(会带上 sm_100/103/120); 见 build_matrix 注释
 ARCH_MAX_SM = 90
 

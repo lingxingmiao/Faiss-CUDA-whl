@@ -113,7 +113,9 @@ repository_dispatch                                    多 CUDA × 多 PY   tag:
   `python=3.x openblas cmake ninja cuda-version=12.9 cuda-nvcc cuda-cudart-dev cuda-cuobjdump libcublas-dev libcurand-dev`，
   由 `cuda-version` 把各组件钉在同一条 12.x 线上。
 - MSVC 不固定工具集（用 Runner 自带），改由 nvcc 的 `-allow-unsupported-compiler` 放开版本检查。
-- 默认只构建 **CUDA 12.9**（架构可到 sm_120/Blackwell）；需要旧线时把 `cuda` 输入写成 `12.6,12.9`。
+- **默认只出两条 CUDA 线：12.6 与 12.9**（`DEFAULT_CUDA`），Python 是 3.10~3.14，即 10 个 job；
+  需要 12.4 / 12.8 时在 dispatch 的 `cuda` 输入里临时加（产物只是运行时对齐不同，见下）。
+  CUDA 13 会被自动拒绝，11.x 也会被跳过（faiss ≥1.12 要 C++20，nvcc 11.8 不认）。
 
 ## 补丁集
 
