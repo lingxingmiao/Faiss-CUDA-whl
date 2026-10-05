@@ -87,6 +87,14 @@ repository_dispatch                                    多 CUDA × 多 PY   tag:
 | `min60` | 全部 ≥ sm_60 的架构（16 个） | 最全但要编译 16 份内核，DLL 极大、耗时明显 |
 | `all` | nvcc 支持的一切 | 含 Maxwell 等远古架构 |
 
+工具链来源（保证可复现，不依赖第三方 action 的版本表）：
+
+- Python / OpenBLAS / CMake / Ninja / CUDA 全部由 **conda-forge** 提供，一次 `micromamba` 创建：
+  `python=3.x openblas cmake ninja cuda-version=12.9 cuda-nvcc cuda-cudart-dev cuda-cuobjdump libcublas-dev libcurand-dev`，
+  由 `cuda-version` 把各组件钉在同一条 12.x 线上。
+- MSVC 不固定工具集（用 Runner 自带），改由 nvcc 的 `-allow-unsupported-compiler` 放开版本检查。
+- 默认只构建 **CUDA 12.9**（架构可到 sm_120/Blackwell）；需要旧线时把 `cuda` 输入写成 `12.6,12.9`。
+
 ## 补丁集
 
 [`.github/patches/`](.github/patches) 里的 4 个补丁由本仓库维护，`git apply` 应用；
@@ -96,7 +104,7 @@ repository_dispatch                                    多 CUDA × 多 PY   tag:
 | --- | --- | --- |
 | `0001-msvc-rpcndr-small-macro.patch` | `faiss/gpu/utils/MergeNetworkWarp.cuh` 的 `bool small` 被 Windows SDK `rpcndr.h` 的 `#define small char` 破坏 → 重命名 `isSmall` | Windows 必需 |
 | `0002-nvcc-msvc-view-initlist.patch` | `PQCodeDistances-inl.cuh` 中 nvcc 12.x 不接受 `view<2>({...})`（`expected an expression`）且 MSVC 需要 `template` 消歧 | Windows 必需 |
-| `0003-windows-preload-cuda-dll.patch` | `faiss/python/__init__.py::_preload_gpu_libs` 增加 Windows 分支：注册 `nvidia-*-cu12` / `CUDA_PATH` 的 bin 目录 | wheel 可用性 |
+| `0003-windows-preload-cuda-dll.patch` | `faiss/python/__init__.py::_preload_gpu_libs` 增加 Windows 分支：注册 `nvidia-*-cu*` / `CUDA_PATH` 的 bin 目录（当前按 **1.15.x** 生成；上游重写该函数后需按新代码重新生成） | wheel 可用性 |
 | `0004-wheel-ship-gpu-build-marker.patch` | `faiss/python/setup.py` 把 `_gpu_build.py` 打进 wheel，否则 GPU 预加载根本不会执行 | wheel 可用性 |
 
 ## 校验

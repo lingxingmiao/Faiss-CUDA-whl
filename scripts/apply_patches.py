@@ -21,18 +21,26 @@ def run(cmd, cwd):
 
 
 def try_apply(patch, cwd):
-    """Return one of: applied / already / failed."""
-    r = run(["git", "apply", "--check", "-p1", patch], cwd)
-    if r.returncode == 0:
-        r2 = run(["git", "apply", "-p1", patch], cwd)
-        if r2.returncode != 0:
-            return "failed", r2.stderr.strip()
-        return "applied", ""
+    """Return one of: applied / already / failed.
+
+    Tries full context first, then -C1 so a patch survives small upstream
+    context drift (the surrounding lines of a hunk are the fragile part).
+    """
+    last_err = ""
+    for ctx in ([], ["-C1"], ["-C0"]):
+        r = run(["git", "apply", "--check", "-p1"] + ctx + [patch], cwd)
+        if r.returncode == 0:
+            r2 = run(["git", "apply", "-p1"] + ctx + [patch], cwd)
+            if r2.returncode != 0:
+                return "failed", r2.stderr.strip()
+            return "applied" + (" (fuzzy)" if ctx else ""), ""
+        last_err = (r.stderr or "").strip() or (r.stdout or "").strip()
     # reverse-applies cleanly => the change is already in the tree
-    r3 = run(["git", "apply", "--check", "-R", "-p1", patch], cwd)
-    if r3.returncode == 0:
-        return "already", ""
-    return "failed", (r.stderr or "").strip() or (r.stdout or "").strip()
+    for ctx in ([], ["-C1"]):
+        r3 = run(["git", "apply", "--check", "-R", "-p1"] + ctx + [patch], cwd)
+        if r3.returncode == 0:
+            return "already", ""
+    return "failed", last_err
 
 
 def main():

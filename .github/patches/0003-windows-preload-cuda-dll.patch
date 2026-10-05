@@ -1,30 +1,31 @@
 --- a/faiss/python/__init__.py
 +++ b/faiss/python/__init__.py
-@@ -40,6 +40,34 @@
+@@ -30,6 +30,35 @@
  
      import ctypes
      import os
-+    import sys
 +
 +    if sys.platform == "win32":
 +        # Windows: the CUDA runtime DLLs are named cudart64_12.dll /
-+        # cublas64_12.dll / curand64_10.dll, and they live either in the CUDA
-+        # Toolkit (CUDA_PATH\bin) or in the nvidia-*-cu12 wheels
-+        # (site-packages/nvidia/<pkg>/bin). Register every directory we can
-+        # find with the DLL loader; never raise, because a plain PATH entry is
-+        # also a valid setup.
++        # cublas64_12.dll / curand64_10.dll and live either in the CUDA Toolkit
++        # (CUDA_PATH\bin) or in the nvidia-*-cu* wheels
++        # (site-packages/nvidia/<pkg>/bin, site-packages/nvidia/cu13/bin).
++        # Register every directory we can find with the DLL loader and never
++        # raise: a plain PATH entry is a valid setup as well.
 +        _dirs = []
-+        for _pkg in ("cuda_runtime", "cublas", "curand", "cuda_nvrtc", "nvjitlink"):
++        for _pkg in ("cuda_runtime", "cublas", "curand", "nvjitlink", "cu13"):
 +            try:
 +                _mod = __import__("nvidia." + _pkg, fromlist=["*"])
 +            except ImportError:
 +                continue
-+            for _sub in ("bin", os.path.join("bin", "x64")):
-+                _dirs.append(os.path.join(_mod.__path__[0], _sub))
++            for _root in list(getattr(_mod, "__path__", [])):
++                for _sub in ("bin", os.path.join("bin", "x64"), "lib"):
++                    _dirs.append(os.path.join(_root, _sub))
 +        for _env in ("FAISS_CUDA_PATH", "CUDA_PATH", "CUDA_HOME", "CUDA_ROOT"):
 +            _root = os.environ.get(_env)
 +            if _root:
-+                _dirs.append(_root if _root.lower().endswith("bin") else os.path.join(_root, "bin"))
++                _dirs.append(_root if _root.lower().endswith("bin")
++                             else os.path.join(_root, "bin"))
 +        for _dir in _dirs:
 +            if os.path.isdir(_dir):
 +                try:
@@ -33,5 +34,5 @@
 +                    pass
 +        return
  
-     try:
-         import nvidia.cuda_runtime
+     def _load(path):
+         """dlopen one .so with global visibility, or raise a fix-it."""

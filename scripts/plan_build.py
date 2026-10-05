@@ -20,19 +20,14 @@ import urllib.request
 
 UPSTREAM = "facebookresearch/faiss"
 
-# CUDA -> MSVC toolset pin. CUDA < 13 is mandatory here: CUDA 13 dropped
-# sm_60 (P100) and sm_70 (V100), so it cannot produce the artefacts this
-# repository exists for.
-CUDA_TOOLSET = {
-    "11.8.0": "14.2",
-    "12.1.1": "14.3",
-    "12.4.1": "14.3",
-    "12.6.3": "14.3",
-    "12.8.1": "14.4",
-    "12.9.0": "14.4",
-}
-
-DEFAULT_CUDA = "12.9.0,12.6.3"
+# CUDA < 13 is mandatory here: CUDA 13 dropped sm_60 (P100) and sm_70 (V100),
+# so it cannot produce the artefacts this repository exists for.
+# The toolkit itself comes from conda-forge (`cuda-version=<major.minor>`), so
+# only major.minor is needed. No MSVC toolset is pinned: the workflow passes
+# nvcc's -allow-unsupported-compiler instead, which is what makes 12.9 work with
+# the runner's default toolset (12.6 with a 14.4x toolset is unsupported by
+# nvcc but usually still compiles; use it at your own risk).
+DEFAULT_CUDA = "12.9"
 DEFAULT_PYTHON = "3.10,3.11,3.12,3.13"
 
 
@@ -78,23 +73,24 @@ def cuda_tag(version):
 
 
 def build_matrix(cuda_versions, python_versions, arch_mode):
+    """cuda_versions entries may be '12.9' or '12.9.0'; only major.minor matters
+    because the toolkit comes from conda-forge as `cuda-version=<major.minor>`."""
     entries = []
     for cuda in cuda_versions:
-        major = int(cuda.split(".")[0])
+        parts = cuda.split(".")
+        if len(parts) < 2:
+            log("!! skip CUDA %s: expected major.minor" % cuda)
+            continue
+        short = "%s.%s" % (parts[0], parts[1])
+        major = int(parts[0])
         if major >= 13:
             log("!! skip CUDA %s: CUDA 13 dropped sm_60/sm_70 support" % cuda)
             continue
-        toolset = CUDA_TOOLSET.get(cuda)
-        if toolset is None:
-            log("!! skip CUDA %s: no MSVC toolset pin known" % cuda)
-            continue
-        short = ".".join(cuda.split(".")[:2])
         for py in python_versions:
             entries.append({
-                "cuda": cuda,
+                "cuda": short,
                 "cuda_short": short,
-                "cuda_tag": cuda_tag(cuda),
-                "toolset": toolset,
+                "cuda_tag": cuda_tag(short),
                 "python": py,
                 "py_tag": "cp" + py.replace(".", ""),
                 "arch_mode": arch_mode,
@@ -125,8 +121,8 @@ def main():
                     help="true = rebuild even if the release already exists")
     ap.add_argument("--cuda", default=os.environ.get("IN_CUDA") or DEFAULT_CUDA)
     ap.add_argument("--python", default=os.environ.get("IN_PYTHON") or DEFAULT_PYTHON)
-    ap.add_argument("--arch-mode", default=os.environ.get("IN_ARCH_MODE") or "min60",
-                    choices=["min60", "all"])
+    ap.add_argument("--arch-mode", default=os.environ.get("IN_ARCH_MODE") or "major",
+                    choices=["major", "min60", "all"])
     ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     args = ap.parse_args()
 
@@ -163,8 +159,8 @@ def main():
     log("")
     log("planned jobs (%d):" % len(matrix))
     for e in matrix:
-        log("  cuda %-8s py %-5s toolset %-5s arch %s"
-            % (e["cuda"], e["python"], e["toolset"], e["arch_mode"]))
+        log("  cuda %-8s py %-5s arch %s"
+            % (e["cuda"], e["python"], e["arch_mode"]))
     emit(version, True, matrix)
     return 0
 
